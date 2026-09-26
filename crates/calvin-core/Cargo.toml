@@ -1,0 +1,13 @@
+[package]
+name = "calvin-core"
+version = "0.1.0"
+edition = "2021"
+
+[build-dependencies]
+cbindgen = "0.26.0"
+
+[dependencies]
+bumpalo = { workspace = true }
+
+[dev-dependencies]
+calvin-parse = { path = "../calvin-parse" }

@@ -1,0 +1,11 @@
+[package]
+name = "calvin-boot"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+calvin-core = { path = "../calvin-core" }
+calvin-parse = { path = "../calvin-parse" }

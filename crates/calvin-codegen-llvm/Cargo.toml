@@ -1,0 +1,8 @@
+[package]
+name = "calvin-codegen-llvm"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+calvin-core = { path = "../calvin-core" }
+inkwell = { workspace = true }

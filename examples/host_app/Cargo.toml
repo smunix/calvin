@@ -1,0 +1,8 @@
+[package]
+name = "host_app"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+calvin-storage = { path = "../../crates/calvin-storage" }
+calvin-macros = { path = "../../crates/calvin-macros" }

@@ -1,0 +1,12 @@
+[package]
+name = "calvin-codegen-cranelift"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+calvin-core = { path = "../calvin-core" }
+cranelift-codegen = "0.113"
+cranelift-frontend = "0.113"
+cranelift-jit = "0.113"
+cranelift-module = "0.113"
+cranelift-native = "0.113"

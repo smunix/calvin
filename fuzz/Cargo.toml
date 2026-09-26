@@ -1,0 +1,50 @@
+[package]
+name = "calvin-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+chumsky = { version = "1.0.0-alpha.8", features = ["std"] }
+logos = "0.14"
+tempfile = "3.8"
+libfuzzer-sys = "0.4"
+calvin-parse = { path = "../crates/calvin-parse" }
+calvin-core = { path = "../crates/calvin-core" }
+calvin-storage = { path = "../crates/calvin-storage" }
+calvin-net = { path = "../crates/calvin-net" }
+calvin-codegen-cranelift = { path = "../crates/calvin-codegen-cranelift" }
+
+[[bin]]
+name = "fuzz_parser"
+path = "fuzz_targets/fuzz_parser.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "fuzz_type_decoder"
+path = "fuzz_targets/fuzz_type_decoder.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "fuzz_fregion"
+path = "fuzz_targets/fuzz_fregion.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "fuzz_net"
+path = "fuzz_targets/fuzz_net.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "fuzz_jit"
+path = "fuzz_targets/fuzz_jit.rs"
+test = false
+doc = false
+[workspace]

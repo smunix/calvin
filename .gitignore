@@ -1,0 +1,6 @@
+/target
+Cargo.lock
+.jj
+*.log
+*.fregion
+fuzz/target/

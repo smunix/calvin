@@ -1,0 +1,12 @@
+[package]
+name = "cog"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+calvin-storage = { path = "../crates/calvin-storage" }
+libc = "0.2"
+clap = { version = "4.4", features = ["derive"] }
