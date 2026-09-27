@@ -5,11 +5,16 @@ use crate::context::TypeContext;
 use crate::lang::expr::{Expr, ExprVisitor, Literal, Pattern};
 use crate::lang::types::{MonoType, Prim};
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq, Clone)]
 pub enum TypeError {
     TypeMismatch,
     OccursCheckFailed,
     UnboundVariable(String),
+    UnsatisfiableConstraint {
+        class_name: String,
+        args: Vec<String>,
+        explanation: Option<String>,
+    },
 }
 
 #[derive(Clone)]
@@ -116,6 +121,75 @@ impl<'a> TypeInference<'a> {
                             _ => {}
                         }
                     }
+                }
+            }
+        }
+
+        for c in self.constraints.borrow().iter() {
+            if let MonoType::Constraint(name, args, _) = c.chase() {
+                // If satisfied by the typeclass registry instance database, discharge constraint
+                if self.classes.is_satisfied(name, args) {
+                    continue;
+                }
+
+                // Or if satisfied by standard arithmetic ground primitives
+                if args.len() == 3 && (*name == "Add" || *name == "Subtract" || *name == "Multiply" || *name == "Divide") {
+                    let a = args[0].chase();
+                    let b = args[1].chase();
+                    let c_arg = args[2].chase();
+                    match (a, b, c_arg) {
+                        (MonoType::Prim(p1), MonoType::Prim(p2), MonoType::Prim(p3)) => {
+                            if (p1 == p2 && p2 == p3)
+                                || (*p1 == Prim::DateTime && *p2 == Prim::Time && *p3 == Prim::DateTime)
+                                || (*p1 == Prim::Time && *p2 == Prim::TimeSpan && *p3 == Prim::Time)
+                            {
+                                continue;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+
+                // Check if input parameters are ground (contain no free type variables)
+                let input_args_closed = match *name {
+                    "Add" | "Subtract" | "Multiply" | "Divide" if args.len() >= 2 => {
+                        !crate::lang::typeclass::has_free_tvars(args[0].chase())
+                            && !crate::lang::typeclass::has_free_tvars(args[1].chase())
+                    }
+                    _ => {
+                        let class_def = self.classes.classes.get(*name);
+                        if let Some(cd) = class_def {
+                            if !cd.fundeps.is_empty() {
+                                cd.fundeps.iter().any(|(from, _)| {
+                                    from.iter().all(|&i| i < args.len() && !crate::lang::typeclass::has_free_tvars(args[i].chase()))
+                                })
+                            } else {
+                                args.iter().all(|arg| !crate::lang::typeclass::has_free_tvars(arg.chase()))
+                            }
+                        } else {
+                            args.iter().all(|arg| !crate::lang::typeclass::has_free_tvars(arg.chase()))
+                        }
+                    }
+                };
+
+                if input_args_closed {
+                    let explanation = self.classes.explain_unsatisfiable(name, args);
+                    let arg_strs: Vec<String> = args
+                        .iter()
+                        .map(|arg| {
+                            let chased = arg.chase();
+                            if crate::lang::typeclass::has_free_tvars(chased) {
+                                "a".to_string()
+                            } else {
+                                crate::lang::types::format_mono_no_simpl(chased)
+                            }
+                        })
+                        .collect();
+                    return Err(TypeError::UnsatisfiableConstraint {
+                        class_name: name.to_string(),
+                        args: arg_strs,
+                        explanation,
+                    });
                 }
             }
         }

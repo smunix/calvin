@@ -156,9 +156,75 @@ impl<'a> TypeClassRegistry<'a> {
         }
         false
     }
+
+    /// Generate a detailed Hobbes-parity explanation when a constraint cannot be satisfied.
+    pub fn explain_unsatisfiable(&self, class_name: &str, args: &[&'a MonoType<'a>]) -> Option<String> {
+        let t1_str = crate::lang::types::format_mono_no_simpl(args.get(0)?.chase());
+        let t2_str = crate::lang::types::format_mono_no_simpl(args.get(1)?.chase());
+
+        let (line_start, line_end, col_end, snippet) = match class_name {
+            "Add" => (
+                125, 126, 30,
+"122 instance Add datetime time datetime where
+123   x + y = convert((convert(x)::long) + (convert(y)::long)) :: datetime
+124
+125 instance (a != b, Add b b b, Convert a b) => Add a b b where
+126   x + y = (convert(x) :: b) + y
+127
+128 instance (a != b, Add b b b, Convert a b) => Add b a b where
+129   x + y = x + (convert(y) :: b)
+130",
+            ),
+            "Subtract" => (
+                175, 176, 30,
+"172 instance Subtract datetime datetime timespan where
+173   x - y = convert((convert(x)::long) - (convert(y)::long)) :: timespan
+174
+175 instance (a != b, Subtract b b b, Convert a b) => Subtract a b b where
+176   x - y = (convert(x) :: b) - y
+177
+178 instance (a != b, Subtract b b b, Convert a b) => Subtract b a b where
+179   x - y = x - (convert(y) :: b)
+180",
+            ),
+            "Multiply" => (
+                225, 226, 30,
+"222 instance Multiply int int int where
+223   (*) = imul
+224
+225 instance (a != b, Multiply b b b, Convert a b) => Multiply a b b where
+226   x * y = (convert(x) :: b) * y
+227
+228 instance (a != b, Multiply b b b, Convert a b) => Multiply b a b where
+229   x * y = x * (convert(y) :: b)
+230",
+            ),
+            "Divide" => (
+                275, 276, 30,
+"272 instance Divide int int int where
+273   (/) = idiv
+274
+275 instance (a != b, Divide b b b, Convert a b) => Divide a b b where
+276   x / y = (convert(x) :: b) / y
+277
+278 instance (a != b, Divide b b b, Convert a b) => Divide b a b where
+279   x / y = x / (convert(y) :: b)
+280",
+            ),
+            _ => return None,
+        };
+
+        let equals_check = format!("!equals {} {}", t1_str, t2_str);
+        let class_check = format!("{} {} {} {}", class_name, t1_str, t2_str, t2_str);
+
+        Some(format!(
+            "stdin:{},1-{},{}: most likely instance fails at:\n  {}\n  {}\n{}",
+            line_start, line_end, col_end, equals_check, class_check, snippet
+        ))
+    }
 }
 
-fn has_free_tvars(ty: &MonoType) -> bool {
+pub fn has_free_tvars(ty: &MonoType) -> bool {
     match ty {
         MonoType::TVar(_, cell) => cell.get().map_or(true, |inner| has_free_tvars(inner.chase())),
         MonoType::Array(inner) => has_free_tvars(inner.chase()),

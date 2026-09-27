@@ -185,7 +185,12 @@ impl<'a, 'm, 'expr> ExprVisitor<'expr, ir::Value> for LoweringContext<'a, 'm> {
 
     fn visit_app(&mut self, f: &'expr Expr<'expr>, args: &'expr [&'expr Expr<'expr>]) -> ir::Value {
         if let Expr::Var(op) = f {
-            if args.len() == 2 {
+            if args.len() == 2 && matches!(*op, "+" | "-" | "*" | "/") {
+                if matches!(args[0], Expr::Record(_) | Expr::Tuple(_) | Expr::Array(_))
+                    || matches!(args[1], Expr::Record(_) | Expr::Tuple(_) | Expr::Array(_))
+                {
+                    panic!("Attempted arithmetic operator {} on non-primitive pointer", op);
+                }
                 let lhs = self.visit(args[0]);
                 let rhs = self.visit(args[1]);
                 let is_float = self.builder.func.dfg.value_type(lhs).is_float();
@@ -194,7 +199,7 @@ impl<'a, 'm, 'expr> ExprVisitor<'expr, ir::Value> for LoweringContext<'a, 'm> {
                     "-" => if is_float { self.builder.ins().fsub(lhs, rhs) } else { self.builder.ins().isub(lhs, rhs) },
                     "*" => if is_float { self.builder.ins().fmul(lhs, rhs) } else { self.builder.ins().imul(lhs, rhs) },
                     "/" => if is_float { self.builder.ins().fdiv(lhs, rhs) } else { self.builder.ins().sdiv(lhs, rhs) },
-                    _ => unimplemented!("unsupported operator {}", op),
+                    _ => unreachable!(),
                 };
             }
         }

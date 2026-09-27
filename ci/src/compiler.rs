@@ -20,6 +20,65 @@ pub enum BackendChoice {
     Llvm,
 }
 
+fn format_type_error(err: &calvin_core::lang::typeinf::TypeError, src: &str) -> String {
+    match err {
+        calvin_core::lang::typeinf::TypeError::TypeMismatch => "Type error: TypeMismatch".to_string(),
+        calvin_core::lang::typeinf::TypeError::OccursCheckFailed => "Type error: OccursCheckFailed".to_string(),
+        calvin_core::lang::typeinf::TypeError::UnboundVariable(v) => format!("Type error: UnboundVariable({})", v),
+        calvin_core::lang::typeinf::TypeError::UnsatisfiableConstraint { class_name, args, explanation } => {
+            let cst_str = format!("{} {}", class_name, args.join(" "));
+            let span_end = src.trim().len();
+            let mut out = format!("stdin:1,1-{}: Constraint not satisfiable: {}\n1 {}", span_end, cst_str, src.trim());
+            if let Some(expl) = explanation {
+                out.push('\n');
+                out.push_str(expl);
+            }
+            out
+        }
+    }
+}
+
+fn format_unresolved_constraints_error<'a>(
+    residuals: &[(&str, Vec<&'a calvin_core::lang::types::MonoType<'a>>)],
+) -> String {
+    let mut names = std::collections::HashMap::new();
+    let mut var_idx = 0;
+    for (_, cargs) in residuals {
+        for arg in cargs {
+            let mut set = std::collections::HashSet::new();
+            arg.free_tvars(&mut set);
+            for id in set {
+                if !names.contains_key(&id) {
+                    let name = if var_idx < 26 {
+                        ((b'a' + var_idx as u8) as char).to_string()
+                    } else {
+                        format!("t{}", var_idx - 26)
+                    };
+                    names.insert(id, name);
+                    var_idx += 1;
+                }
+            }
+        }
+    }
+    let cst_strs: Vec<String> = residuals
+        .iter()
+        .map(|(name, args)| {
+            let args_str = args
+                .iter()
+                .map(|a| calvin_core::lang::types::format_mono(a, &names))
+                .collect::<Vec<_>>()
+                .join(" ");
+            format!("{} {}", name, args_str)
+        })
+        .collect();
+
+    format!(
+        "Failed to compile expression due to unresolved type constraint{}: {}",
+        if cst_strs.len() > 1 { "s" } else { "" },
+        cst_strs.join(", ")
+    )
+}
+
 pub struct Compiler<'ctx> {
     ctx: &'ctx TypeContext,
     cranelift_jit: Option<CraneliftJIT>,
@@ -95,9 +154,9 @@ impl<'ctx> Compiler<'ctx> {
         let mut type_inf = self.make_type_inf();
         let ty = type_inf
             .visit(expr)
-            .map_err(|e| format!("Type error: {:?}", e))?;
+            .map_err(|e| format_type_error(&e, src))?;
             
-        type_inf.solve_constraints().map_err(|e| format!("Type error: {:?}", e))?;
+        type_inf.solve_constraints().map_err(|e| format_type_error(&e, src))?;
 
         let residuals = type_inf.residual_constraints();
         Ok(calvin_core::lang::types::format_qual_type(ty, &residuals))
@@ -108,9 +167,14 @@ impl<'ctx> Compiler<'ctx> {
         let mut type_inf = self.make_type_inf();
         let ty = type_inf
             .visit(expr)
-            .map_err(|e| format!("Type error: {:?}", e))?;
+            .map_err(|e| format_type_error(&e, src))?;
             
-        type_inf.solve_constraints().map_err(|e| format!("Type error: {:?}", e))?;
+        type_inf.solve_constraints().map_err(|e| format_type_error(&e, src))?;
+
+        let residuals = type_inf.residual_constraints();
+        if !residuals.is_empty() {
+            return Err(format_unresolved_constraints_error(&residuals));
+        }
 
         if let Some(ref mut jit) = self.cranelift_jit {
             Ok(jit.compile_and_dump_ir(expr, ty))
@@ -126,9 +190,14 @@ impl<'ctx> Compiler<'ctx> {
         let mut type_inf = self.make_type_inf();
         let ty = type_inf
             .visit(expr)
-            .map_err(|e| format!("Type error: {:?}", e))?;
+            .map_err(|e| format_type_error(&e, src))?;
             
-        type_inf.solve_constraints().map_err(|e| format!("Type error: {:?}", e))?;
+        type_inf.solve_constraints().map_err(|e| format_type_error(&e, src))?;
+
+        let residuals = type_inf.residual_constraints();
+        if !residuals.is_empty() {
+            return Err(format_unresolved_constraints_error(&residuals));
+        }
 
         let func_ptr = if let Some(ref mut jit) = self.cranelift_jit {
             match ty.chase() {
@@ -189,9 +258,14 @@ impl<'ctx> Compiler<'ctx> {
         let mut type_inf = self.make_type_inf();
         let ty = type_inf
             .visit(expr)
-            .map_err(|e| format!("Type error: {:?}", e))?;
+            .map_err(|e| format_type_error(&e, src))?;
             
-        type_inf.solve_constraints().map_err(|e| format!("Type error: {:?}", e))?;
+        type_inf.solve_constraints().map_err(|e| format_type_error(&e, src))?;
+
+        let residuals = type_inf.residual_constraints();
+        if !residuals.is_empty() {
+            return Err(format_unresolved_constraints_error(&residuals));
+        }
 
         if let MonoType::Fn(_, _) = ty.chase() {
             return Ok("<closure>".to_string());

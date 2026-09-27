@@ -187,7 +187,12 @@ impl<'a, 'ctx, 'expr> ExprVisitor<'expr, BasicValueEnum<'ctx>> for LoweringConte
         args: &'expr [&'expr Expr<'expr>],
     ) -> BasicValueEnum<'ctx> {
         if let Expr::Var(op) = f {
-            if args.len() == 2 {
+            if args.len() == 2 && matches!(*op, "+" | "-" | "*" | "/") {
+                if matches!(args[0], Expr::Record(_) | Expr::Tuple(_) | Expr::Array(_))
+                    || matches!(args[1], Expr::Record(_) | Expr::Tuple(_) | Expr::Array(_))
+                {
+                    panic!("Attempted arithmetic operator {} on non-primitive pointer", op);
+                }
                 let lhs = self.visit(args[0]);
                 let rhs = self.visit(args[1]);
 
@@ -199,7 +204,7 @@ impl<'a, 'ctx, 'expr> ExprVisitor<'expr, BasicValueEnum<'ctx>> for LoweringConte
                         "-" => self.builder.build_float_sub(l, r, "fsubtmp").unwrap(),
                         "*" => self.builder.build_float_mul(l, r, "fmultmp").unwrap(),
                         "/" => self.builder.build_float_div(l, r, "fdivtmp").unwrap(),
-                        _ => unimplemented!("unsupported operator"),
+                        _ => unreachable!(),
                     };
                     return res.into();
                 } else {
@@ -213,7 +218,7 @@ impl<'a, 'ctx, 'expr> ExprVisitor<'expr, BasicValueEnum<'ctx>> for LoweringConte
                             .builder
                             .build_int_signed_div(l, r, "sdivtmp")
                             .unwrap(),
-                        _ => unimplemented!("unsupported operator"),
+                        _ => unreachable!(),
                     };
                     return res.into();
                 }

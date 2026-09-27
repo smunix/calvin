@@ -134,14 +134,14 @@ fn test_hobbes_record_and_variant_parsing_and_typing() {
     let ast1 = parse_expr(&ctx, "{x: 1, y: 2}").expect("parse failed");
     let ty1 = typeinf.visit(ast1).expect("infer failed");
     let residuals1 = typeinf.residual_constraints();
-    assert_eq!(format_qual_type(ty1, &residuals1), "{x:int, y:int}");
+    assert_eq!(format_qual_type(ty1, &residuals1), "{ x:int, y:int }");
 
     // 2. Hobbes record: {x=1, y=2}
     let mut typeinf = setup_typeinf(&ctx);
     let ast2 = parse_expr(&ctx, "{x=1, y=2}").expect("parse failed");
     let ty2 = typeinf.visit(ast2).expect("infer failed");
     let residuals2 = typeinf.residual_constraints();
-    assert_eq!(format_qual_type(ty2, &residuals2), "{x:int, y:int}");
+    assert_eq!(format_qual_type(ty2, &residuals2), "{ x:int, y:int }");
 
     // 3. Variant: |x=1|
     let mut typeinf = setup_typeinf(&ctx);
@@ -156,5 +156,26 @@ fn test_hobbes_record_and_variant_parsing_and_typing() {
     let ty4 = typeinf.visit(ast4).expect("infer failed");
     let residuals4 = typeinf.residual_constraints();
     assert_eq!(format_qual_type(ty4, &residuals4), "|x:()|");
+}
+
+#[test]
+fn test_unsatisfiable_constraint_error() {
+    let ctx = TypeContext::new();
+    let mut typeinf = setup_typeinf(&ctx);
+    let ast = parse_expr(&ctx, "{x: 1, y: 2} + {x: 3, y: 3}").expect("parse failed");
+    let _ty = typeinf.visit(ast).expect("infer failed");
+    let err = typeinf.solve_constraints().expect_err("should fail to solve");
+    match err {
+        calvin_core::lang::typeinf::TypeError::UnsatisfiableConstraint { class_name, args, explanation } => {
+            assert_eq!(class_name, "Add");
+            assert_eq!(args, vec!["{ x:int, y:int }", "{ x:int, y:int }", "a"]);
+            assert!(explanation.is_some());
+            let expl = explanation.unwrap();
+            assert!(expl.contains("most likely instance fails at:"));
+            assert!(expl.contains("!equals { x:int, y:int } { x:int, y:int }"));
+            assert!(expl.contains("Add { x:int, y:int } { x:int, y:int } { x:int, y:int }"));
+        }
+        _ => panic!("Expected UnsatisfiableConstraint error, got {:?}", err),
+    }
 }
 

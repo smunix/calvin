@@ -490,11 +490,15 @@ pub fn format_mono<'a>(ty: &'a MonoType<'a>, names: &std::collections::HashMap<u
         MonoType::Array(inner) => format!("[{}]", format_mono(inner, names)),
         MonoType::FixedArray(inner, len) => format!("[:{}|{}:]", format_mono(inner, names), len),
         MonoType::Record(fields, _) => {
-            let parts: Vec<_> = fields
-                .iter()
-                .map(|(n, t)| format!("{}:{}", n, format_mono(t, names)))
-                .collect();
-            format!("{{{}}}", parts.join(", "))
+            if fields.is_empty() {
+                "{}".to_string()
+            } else {
+                let parts: Vec<_> = fields
+                    .iter()
+                    .map(|(n, t)| format!("{}:{}", n, format_mono(t, names)))
+                    .collect();
+                format!("{{ {} }}", parts.join(", "))
+            }
         }
         MonoType::Variant(cases, _) => {
             let parts: Vec<_> = cases
@@ -575,11 +579,15 @@ pub fn format_mono_no_simpl<'a>(ty: &'a MonoType<'a>) -> String {
         MonoType::Array(inner) => format!("[{}]", format_mono_no_simpl(inner)),
         MonoType::FixedArray(inner, len) => format!("[:{}|{}:]", format_mono_no_simpl(inner), len),
         MonoType::Record(fields, _) => {
-            let parts: Vec<_> = fields
-                .iter()
-                .map(|(n, t)| format!("{}:{}", n, format_mono_no_simpl(t)))
-                .collect();
-            format!("{{{}}}", parts.join(", "))
+            if fields.is_empty() {
+                "{}".to_string()
+            } else {
+                let parts: Vec<_> = fields
+                    .iter()
+                    .map(|(n, t)| format!("{}:{}", n, format_mono_no_simpl(t)))
+                    .collect();
+                format!("{{ {} }}", parts.join(", "))
+            }
         }
         MonoType::Variant(cases, _) => {
             let parts: Vec<_> = cases
