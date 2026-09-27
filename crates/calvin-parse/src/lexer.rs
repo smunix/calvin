@@ -13,7 +13,7 @@ pub enum LexicalError {
 #[logos(skip r"[ \t\r\n\f]+")] // Skip spaces, tabs, newlines, form feeds.
 #[logos(skip r"//[^\n]*")] // Skip line comments
 #[logos(skip r"/\*([^*]|\*[^/])*\*/")] // Skip block comments
-#[logos(skip r"\{-#([^-]|-+[^#-])*-+#\}")] // Skip pragmas like {-# UNSAFE ... #-}
+#[logos(skip r"\{-#([^#]|#[^-]|#-[^}])*#-\}")] // Skip pragmas like {-# UNSAFE ... #-}
 pub enum Token<'a> {
     // Keywords
     #[token("let")]
@@ -88,6 +88,14 @@ pub enum Token<'a> {
     Pipe,
     #[token("_", priority = 10)]
     Underscore,
+    #[token("@")]
+    At,
+    #[token("?")]
+    Question,
+    #[token("exists")]
+    Exists,
+    #[token("unpack")]
+    Unpack,
 
     // Operators
     #[token("+")]
@@ -206,5 +214,30 @@ pub enum Token<'a> {
 impl<'a> fmt::Display for Token<'a> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{:?}", self)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_lex_hobbes_boot_files() {
+        let amapping = include_str!("../../calvin-boot/boot/amapping.hob");
+        let convert = include_str!("../../calvin-boot/boot/convert.hob");
+
+        let lex1: Vec<_> = Token::lexer(amapping).spanned().collect();
+        for (res, span) in lex1 {
+            if let Err(e) = res {
+                panic!("Lex error in amapping.hob at {:?}: {:?}", span, e);
+            }
+        }
+
+        let lex2: Vec<_> = Token::lexer(convert).spanned().collect();
+        for (res, span) in lex2 {
+            if let Err(e) = res {
+                panic!("Lex error in convert.hob at {:?}: {:?}", span, e);
+            }
+        }
     }
 }

@@ -60,12 +60,17 @@ where
             .delimited_by(just(Token::LBrace), just(Token::RBrace))
             .map(move |fields| Pattern::Record(ctx.alloc_slice_clone(&fields)));
 
-        let variant_payload = select! { Token::Ident(name) => name }
+        let variant_tag = choice((
+            select! { Token::Ident(name) => name },
+            select! { Token::Int(0) => "0", Token::Int(1) => "1", Token::Int(2) => "2" },
+        ));
+
+        let variant_payload = variant_tag
             .then_ignore(just(Token::Colon).or(just(Token::Eq)))
             .then(pat.clone())
             .map(move |(tag, payload)| Pattern::Variant(tag, &*ctx.alloc(payload)));
 
-        let variant_unit = select! { Token::Ident(name) => name }
+        let variant_unit = variant_tag
             .map(move |tag| {
                 let unit = Pattern::Literal(Literal::Unit);
                 Pattern::Variant(tag, &*ctx.alloc(unit))
@@ -139,12 +144,17 @@ where
             .delimited_by(just(Token::LBrace), just(Token::RBrace))
             .map(move |fields| &*ctx.alloc(Expr::Record(ctx.alloc_slice_clone(&fields))));
 
-        let variant_payload = select! { Token::Ident(name) => name }
+        let variant_tag = choice((
+            select! { Token::Ident(name) => name },
+            select! { Token::Int(0) => "0", Token::Int(1) => "1", Token::Int(2) => "2" },
+        ));
+
+        let variant_payload = variant_tag
             .then_ignore(just(Token::Colon).or(just(Token::Eq)))
             .then(expr.clone())
             .map(move |(tag, payload)| &*ctx.alloc(Expr::Variant(tag, payload)));
 
-        let variant_unit = select! { Token::Ident(name) => name }
+        let variant_unit = variant_tag
             .map(move |tag| {
                 let unit = &*ctx.alloc(Expr::Literal(Literal::Unit));
                 &*ctx.alloc(Expr::Variant(tag, unit))
@@ -178,8 +188,12 @@ where
                 None => Postfix::Index(start),
             });
 
+        let field_name = choice((
+            select! { Token::Ident(name) => name },
+            select! { Token::Int(0) => "0", Token::Int(1) => "1", Token::Int(2) => "2" },
+        ));
         let field_parser = just(Token::Dot)
-            .ignore_then(select! { Token::Ident(name) => name })
+            .ignore_then(field_name)
             .map(Postfix::Field);
 
         let atom_postfix = atom.foldl(
@@ -199,9 +213,9 @@ where
         ).boxed();
 
         let atom_annotated = atom_postfix
-            .then(just(Token::DoubleColon).ignore_then(type_expr_parser()).or_not())
+            .then(just(Token::DoubleColon).ignore_then(qual_type_parser()).or_not())
             .map(move |(e, ty_opt)| match ty_opt {
-                Some(te) => &*ctx.alloc(Expr::Annotate(e, lower_type_expr(ctx, &te))),
+                Some(qte) => &*ctx.alloc(Expr::Annotate(e, lower_qual_type(ctx, &qte))),
                 None => e,
             });
 
@@ -353,10 +367,50 @@ where
                 &*ctx.alloc(Expr::If(cond, then_e, else_e))
             });
 
-        choice((if_expr, let_bind, lambda, match_expr, op_or))
-            .then(just(Token::DoubleColon).ignore_then(type_expr_parser()).or_not())
+        let do_stmt = choice((
+            expr.clone()
+                .then(choice((just(Token::LeftArrow), just(Token::Eq))))
+                .then(expr.clone())
+                .map(|((_lhs, _), rhs)| (Some(Pattern::Any), rhs)),
+            just(Token::Return)
+                .ignore_then(expr.clone())
+                .map(|e| (None, e)),
+            expr.clone().map(|e| (Some(Pattern::Any), e)),
+        ));
+
+        let do_expr = just(Token::Do)
+            .ignore_then(
+                do_stmt
+                    .separated_by(just(Token::Semi))
+                    .allow_trailing()
+                    .collect::<Vec<_>>()
+                    .delimited_by(just(Token::LBrace), just(Token::RBrace)),
+            )
+            .map(move |stmts| {
+                let unit = &*ctx.alloc(Expr::Literal(Literal::Unit));
+                stmts.into_iter().rfold(unit, |acc, (pat_opt, e)| {
+                    if let Some(p) = pat_opt {
+                        &*ctx.alloc(Expr::Let(p, e, acc))
+                    } else {
+                        e
+                    }
+                })
+            });
+
+        let unpack_expr = just(Token::Unpack)
+            .ignore_then(select! { Token::Ident(name) => name })
+            .then_ignore(just(Token::Eq))
+            .then(expr.clone())
+            .then_ignore(just(Token::In))
+            .then(expr.clone())
+            .map(move |((name, def), body)| {
+                &*ctx.alloc(Expr::Let(Pattern::Var(name), def, body))
+            });
+
+        choice((if_expr, let_bind, lambda, match_expr, do_expr, unpack_expr, op_or))
+            .then(just(Token::DoubleColon).ignore_then(qual_type_parser()).or_not())
             .map(move |(e, ty_opt)| match ty_opt {
-                Some(te) => &*ctx.alloc(Expr::Annotate(e, lower_type_expr(ctx, &te))),
+                Some(qte) => &*ctx.alloc(Expr::Annotate(e, lower_qual_type(ctx, &qte))),
                 None => e,
             })
     })
@@ -388,7 +442,23 @@ fn lower_type_expr<'a, 'ctx>(
             let elem = lower_type_expr(ctx, inner);
             ctx.alloc(calvin_core::lang::types::MonoType::Array(elem))
         }
+        TypeExpr::App(head, args) => {
+            let h = lower_type_expr(ctx, head);
+            let lowered_args: Vec<&'ctx calvin_core::lang::types::MonoType<'ctx>> =
+                args.iter().map(|a| lower_type_expr(ctx, a)).collect();
+            ctx.alloc(calvin_core::lang::types::MonoType::App(
+                h,
+                ctx.arena().alloc_slice_clone(&lowered_args),
+            ))
+        }
     }
+}
+
+fn lower_qual_type<'a, 'ctx>(
+    ctx: &'ctx TypeContext,
+    qte: &QualTypeExpr<'a>,
+) -> &'ctx calvin_core::lang::types::MonoType<'ctx> {
+    lower_type_expr(ctx, &qte.ty)
 }
 
 pub fn type_expr_parser<'a, I>() -> impl Parser<'a, I, TypeExpr<'a>, ParseError<'a>> + Clone
@@ -413,11 +483,50 @@ where
         }
         .map(TypeExpr::Prim);
 
-        let var = select! { Token::Ident(name) => TypeExpr::Var(name) };
+        let var = select! {
+            Token::Ident(name) => TypeExpr::Var(name),
+            Token::String(s) => TypeExpr::Var(s),
+        };
 
-        let tuple_or_paren = ty
-            .clone()
-            .separated_by(just(Token::Comma))
+        let fixed_array = just(Token::LBracket)
+            .ignore_then(just(Token::Colon))
+            .ignore_then(ty.clone())
+            .then_ignore(just(Token::Pipe))
+            .then(choice((
+                select! { Token::Ident(name) => name },
+                select! { Token::Int(_) => "1" },
+            )))
+            .then_ignore(just(Token::Colon))
+            .then_ignore(just(Token::RBracket))
+            .map(|(elem_ty, _)| TypeExpr::Array(Box::new(elem_ty)));
+
+        let opaque_type = just(Token::Lt)
+            .ignore_then(
+                select! { Token::Ident(name) => name }
+                    .separated_by(just(Token::Dot))
+                    .at_least(1)
+                    .collect::<Vec<_>>(),
+            )
+            .then_ignore(just(Token::Gt))
+            .map(|_parts| TypeExpr::Prim(Prim::Char));
+
+        let exists_type = just(Token::Exists)
+            .then(select! { Token::Ident(name) => name })
+            .then_ignore(just(Token::Dot))
+            .then(ty.clone())
+            .map(|(_, inner)| inner);
+
+        let elem_ty = choice((
+            ty.clone().repeated().at_least(2).collect::<Vec<_>>().map(|mut tys| {
+                let head = tys.remove(0);
+                TypeExpr::App(Box::new(head), tys)
+            }),
+            ty.clone(),
+        ));
+
+        let tuple_sep = choice((just(Token::Comma), just(Token::Star), just(Token::Plus)));
+        let tuple_or_paren = elem_ty
+            .separated_by(tuple_sep)
             .allow_trailing()
             .collect::<Vec<_>>()
             .delimited_by(just(Token::LParen), just(Token::RParen))
@@ -434,7 +543,25 @@ where
             .then_ignore(just(Token::RBracket))
             .map(|t| TypeExpr::Array(Box::new(t)));
 
-        let atom = choice((prim, var, tuple_or_paren, array));
+        let record_field = choice((
+            select! { Token::Ident(name) => name }
+                .then_ignore(just(Token::Colon).or(just(Token::Eq)))
+                .then(ty.clone())
+                .map(|(_, t)| t),
+            ty.clone(),
+        ));
+        let record_type = record_field
+            .separated_by(choice((just(Token::Comma), just(Token::Star))))
+            .allow_trailing()
+            .collect::<Vec<_>>()
+            .delimited_by(just(Token::LBrace), just(Token::RBrace))
+            .map(|_| TypeExpr::Tuple(vec![]));
+
+        let raw_atom = choice((prim, fixed_array, opaque_type, exists_type, array, tuple_or_paren, record_type, var));
+
+        let atom = raw_atom
+            .then(just(Token::At).then(choice((select! { Token::Ident(name) => name }, just(Token::Question).to("?")))).or_not())
+            .map(|(base, _)| base);
 
         atom.clone()
             .then(just(Token::Arrow).ignore_then(ty.clone()).or_not())
@@ -443,6 +570,60 @@ where
                 None => lhs,
             })
     })
+}
+
+pub fn constraint_parser<'a, I>() -> impl Parser<'a, I, TypeConstraint<'a>, ParseError<'a>> + Clone
+where
+    I: chumsky::input::ValueInput<'a, Token = Token<'a>, Span = Span>,
+{
+    let type_expr = type_expr_parser();
+
+    let not_eq = type_expr
+        .clone()
+        .then_ignore(just(Token::NotEq))
+        .then(type_expr.clone())
+        .map(|(t1, t2)| TypeConstraint::NotEq(t1, t2));
+
+    let eq_cst = type_expr
+        .clone()
+        .then_ignore(just(Token::Eq))
+        .then(type_expr.clone())
+        .map(|(t1, t2)| TypeConstraint::Eq(t1, t2));
+
+    let lookup_cst = select! { Token::Ident(name) => name }
+        .then_ignore(just(Token::Slash))
+        .then(select! { Token::Ident(lbl) => lbl })
+        .then_ignore(just(Token::DoubleColon))
+        .then(type_expr.clone())
+        .map(|((s, lbl), ty)| TypeConstraint::FieldLookup(s, lbl, ty));
+
+    let class_cst = select! { Token::Ident(name) => name }
+        .then(type_expr.clone().repeated().at_least(1).collect::<Vec<_>>())
+        .map(|(name, args)| TypeConstraint::Class(name, args));
+
+    choice((class_cst, lookup_cst, not_eq, eq_cst))
+}
+
+pub fn qual_type_parser<'a, I>() -> impl Parser<'a, I, QualTypeExpr<'a>, ParseError<'a>> + Clone
+where
+    I: chumsky::input::ValueInput<'a, Token = Token<'a>, Span = Span>,
+{
+    let constraint = constraint_parser();
+    let type_expr = type_expr_parser();
+
+    let context = constraint
+        .separated_by(just(Token::Comma))
+        .collect::<Vec<_>>()
+        .delimited_by(just(Token::LParen), just(Token::RParen))
+        .then_ignore(just(Token::FatArrow));
+
+    context
+        .or_not()
+        .then(type_expr)
+        .map(|(ctx_opt, ty)| QualTypeExpr {
+            context: ctx_opt.unwrap_or_default(),
+            ty,
+        })
 }
 
 pub fn module_parser<'a, 'ctx, I>(
@@ -481,32 +662,16 @@ where
     let paren_op = op_sym.clone().delimited_by(just(Token::LParen), just(Token::RParen));
     let name_sym = select! { Token::Ident(name) => name }.or(paren_op);
 
-    let not_eq = type_expr
-        .clone()
-        .then_ignore(just(Token::NotEq))
-        .then(type_expr.clone())
-        .map(|(t1, t2)| TypeConstraint::NotEq(t1, t2));
+    let constraint = constraint_parser();
 
-    let class_cst = select! { Token::Ident(name) => name }
-        .then(type_expr.clone().repeated().at_least(1).collect::<Vec<_>>())
-        .map(|(name, args)| TypeConstraint::Class(name, args));
-
-    let constraint = choice((not_eq, class_cst));
-
-    let context = constraint
+    let inst_context = constraint
         .clone()
         .separated_by(just(Token::Comma))
         .collect::<Vec<_>>()
         .delimited_by(just(Token::LParen), just(Token::RParen))
         .then_ignore(just(Token::FatArrow));
 
-    let qual_type = context
-        .or_not()
-        .then(type_expr.clone())
-        .map(|(ctx_opt, ty)| QualTypeExpr {
-            context: ctx_opt.unwrap_or_default(),
-            ty,
-        });
+    let qual_type = qual_type_parser();
 
     let fundep = select! { Token::Ident(name) => name }
         .repeated()
@@ -533,13 +698,15 @@ where
         .map(|(name, ty)| VarTypeDef { name, ty });
 
     let class_def = just(Token::Class)
-        .ignore_then(select! { Token::Ident(name) => name })
+        .ignore_then(inst_context.clone().or_not())
+        .then(select! { Token::Ident(name) => name })
         .then(select! { Token::Ident(name) => name }.repeated().collect::<Vec<_>>())
         .then(fundeps.or_not())
         .then_ignore(just(Token::Where))
         .then(cmember.clone().repeated().collect::<Vec<_>>())
-        .map(|(((name, params), fds), members)| {
+        .map(|((((ctx_opt, name), params), fds), members)| {
             ModuleDef::Class(ClassDef {
+                context: ctx_opt.unwrap_or_default(),
                 name,
                 params,
                 fundeps: fds.unwrap_or_default(),
@@ -547,12 +714,14 @@ where
             })
         });
 
-    let inst_context = constraint
-        .clone()
-        .separated_by(just(Token::Comma))
-        .collect::<Vec<_>>()
-        .delimited_by(just(Token::LParen), just(Token::RParen))
-        .then_ignore(just(Token::FatArrow));
+    let data_def = just(Token::Data)
+        .ignore_then(select! { Token::Ident(name) => name })
+        .then(select! { Token::Ident(name) => name }.repeated().collect::<Vec<_>>())
+        .then_ignore(just(Token::Eq))
+        .then(type_expr.clone())
+        .map(|((name, params), ty)| {
+            ModuleDef::Data(DataDef { name, params, ty })
+        });
 
     let op_member = select! { Token::Ident(lhs) => lhs }
         .then(op_sym)
@@ -565,8 +734,12 @@ where
             body,
         });
 
+    let fn_arg = choice((
+        select! { Token::Ident(arg) => arg },
+        just(Token::Underscore).to("_"),
+    ));
     let fn_member = name_sym
-        .then(select! { Token::Ident(arg) => arg }.repeated().collect::<Vec<_>>())
+        .then(fn_arg.repeated().collect::<Vec<_>>())
         .then_ignore(just(Token::Eq))
         .then(expr.clone())
         .map(|((name, args), body)| VarDef { name, args, body });
@@ -591,7 +764,7 @@ where
     let top_var_type = cmember.map(ModuleDef::VarType);
     let top_var_def = choice((op_member, fn_member)).map(ModuleDef::VarDef);
 
-    let module_def = choice((class_def, instance_def, top_var_type, top_var_def));
+    let module_def = choice((class_def, instance_def, data_def, top_var_type, top_var_def));
 
     let module_header = just(Token::Module)
         .ignore_then(select! { Token::Ident(name) => name })
@@ -684,6 +857,26 @@ lcase cs = map(toLower, cs[0:])
         let src = include_str!("../../calvin-boot/boot/strings.hob");
         let module = parse_module(&ctx, src).expect("failed to parse strings.hob");
         assert_eq!(module.defs.len(), 9);
+    }
+
+    #[test]
+    fn test_parse_amapping_hob() {
+        let ctx = TypeContext::new();
+        let src = include_str!("../../calvin-boot/boot/amapping.hob");
+        let res = parse_module(&ctx, src);
+        if let Err(e) = res {
+            panic!("parse error on amapping.hob: {}", e);
+        }
+    }
+
+    #[test]
+    fn test_parse_convert_hob() {
+        let ctx = TypeContext::new();
+        let src = include_str!("../../calvin-boot/boot/convert.hob");
+        let res = parse_module(&ctx, src);
+        if let Err(e) = res {
+            panic!("parse error on convert.hob: {}", e);
+        }
     }
 }
 

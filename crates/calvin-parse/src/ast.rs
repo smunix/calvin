@@ -13,10 +13,19 @@ pub enum ModuleDef<'a> {
     Instance(InstanceDef<'a>),
     VarDef(VarDef<'a>),
     VarType(VarTypeDef<'a>),
+    Data(DataDef<'a>),
+}
+
+#[derive(Debug, Clone)]
+pub struct DataDef<'a> {
+    pub name: &'a str,
+    pub params: Vec<&'a str>,
+    pub ty: TypeExpr<'a>,
 }
 
 #[derive(Debug, Clone)]
 pub struct ClassDef<'a> {
+    pub context: Vec<TypeConstraint<'a>>,
     pub name: &'a str,
     pub params: Vec<&'a str>,
     pub fundeps: Vec<(Vec<&'a str>, Vec<&'a str>)>,
@@ -54,6 +63,8 @@ pub struct QualTypeExpr<'a> {
 pub enum TypeConstraint<'a> {
     Class(&'a str, Vec<TypeExpr<'a>>),
     NotEq(TypeExpr<'a>, TypeExpr<'a>),
+    Eq(TypeExpr<'a>, TypeExpr<'a>),
+    FieldLookup(&'a str, &'a str, TypeExpr<'a>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -63,4 +74,5 @@ pub enum TypeExpr<'a> {
     Tuple(Vec<TypeExpr<'a>>),
     Fn(Box<TypeExpr<'a>>, Box<TypeExpr<'a>>),
     Array(Box<TypeExpr<'a>>),
+    App(Box<TypeExpr<'a>>, Vec<TypeExpr<'a>>),
 }

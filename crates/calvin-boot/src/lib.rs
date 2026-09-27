@@ -196,6 +196,9 @@ fn load_module_defs<'ctx>(
                     fn_defs.insert(vd.name.to_string(), fn_expr);
                 }
             }
+            ModuleDef::Data(_) => {
+                // Type alias / data vector definitions in boot scripts
+            }
         }
     }
 }
@@ -258,6 +261,12 @@ fn collect_type_vars<'a>(te: &TypeExpr<'a>, vars: &mut Vec<&'a str>) {
         TypeExpr::Array(inner) => {
             collect_type_vars(inner, vars);
         }
+        TypeExpr::App(head, args) => {
+            collect_type_vars(head, vars);
+            for a in args {
+                collect_type_vars(a, vars);
+            }
+        }
     }
 }
 
@@ -287,6 +296,15 @@ fn lower_type_expr<'a, 'ctx>(
         TypeExpr::Array(inner) => {
             let elem = lower_type_expr(ctx, inner, var_map);
             ctx.alloc(MonoType::Array(elem))
+        }
+        TypeExpr::App(head, args) => {
+            let h = lower_type_expr(ctx, head, var_map);
+            let lowered_args: Vec<&'ctx MonoType<'ctx>> =
+                args.iter().map(|a| lower_type_expr(ctx, a, var_map)).collect();
+            ctx.alloc(MonoType::App(
+                h,
+                ctx.arena().alloc_slice_clone(&lowered_args),
+            ))
         }
     }
 }
