@@ -27,6 +27,19 @@ fn init_builtin_env<'ctx>(ctx: &'ctx TypeContext, base_env: &mut TypeEnv<'ctx>) 
     base_env.insert("and", tup_to_bool);
     base_env.insert("or", tup_to_bool);
     base_env.insert("not", bool_to_bool);
+
+    // Identity and conversion primitives matching Hobbes
+    let tgen0: &'ctx MonoType<'ctx> = &*ctx.alloc(MonoType::TGen(0));
+    base_env.insert("id", ctx.alloc(MonoType::Fn(tgen0, tgen0)));
+
+    let int_ty: &'ctx MonoType<'ctx> = &*ctx.alloc(MonoType::Prim(Prim::Int));
+    let long_ty: &'ctx MonoType<'ctx> = &*ctx.alloc(MonoType::Prim(Prim::Long));
+    let short_ty: &'ctx MonoType<'ctx> = &*ctx.alloc(MonoType::Prim(Prim::Short));
+    let byte_ty: &'ctx MonoType<'ctx> = &*ctx.alloc(MonoType::Prim(Prim::Byte));
+
+    base_env.insert("i2l", ctx.alloc(MonoType::Fn(int_ty, long_ty)));
+    base_env.insert("s2i", ctx.alloc(MonoType::Fn(short_ty, int_ty)));
+    base_env.insert("b2l", ctx.alloc(MonoType::Fn(byte_ty, long_ty)));
 }
 
 pub fn init_bootstrap_with_defs<'ctx>(
@@ -38,6 +51,12 @@ pub fn init_bootstrap_with_defs<'ctx>(
 
     // 0. Initialize built-in macro/std functions matching Hobbes
     init_builtin_env(ctx, &mut base_env);
+
+    let id_fn = &*ctx.alloc(Expr::Fn(Pattern::Var("x"), ctx.alloc(Expr::Var("x"))));
+    fn_defs.insert("id".to_string(), id_fn);
+    fn_defs.insert("i2l".to_string(), id_fn);
+    fn_defs.insert("s2i".to_string(), id_fn);
+    fn_defs.insert("b2l".to_string(), id_fn);
 
     // 1. Process all boot scripts in alphabetical order
     for (_name, content) in BOOT_SCRIPTS {
@@ -108,12 +127,6 @@ fn load_module_defs<'ctx>(
                     let inner_fn = if class_def.params.len() == 3 {
                         let b_to_c = ctx.alloc(MonoType::Fn(gen_tys[1], gen_tys[2]));
                         ctx.alloc(MonoType::Fn(gen_tys[0], b_to_c))
-                    } else if class_def.params.len() == 1 {
-                        if op_name == "neg" {
-                            ctx.alloc(MonoType::Fn(gen_tys[0], gen_tys[0]))
-                        } else {
-                            gen_tys[0]
-                        }
                     } else if class_def.params.len() == 2 {
                         let b_to_bool = ctx.alloc(MonoType::Fn(gen_tys[1], ctx.alloc(MonoType::Prim(Prim::Bool))));
                         ctx.alloc(MonoType::Fn(gen_tys[0], b_to_bool))
@@ -364,5 +377,40 @@ mod tests {
         let residuals2 = typeinf2.residual_constraints();
         let formatted2 = calvin_core::lang::types::format_qual_type(ty2, &residuals2);
         assert_eq!(formatted2, "double");
+    }
+
+    #[test]
+    fn test_bootstrap_array_index_from() {
+        let ctx = TypeContext::new();
+        let (env, registry) = init_bootstrap(&ctx).expect("bootstrap failed");
+
+        assert!(registry.classes.contains_key("ArrayIndex"));
+        let instances = registry.instances.get("ArrayIndex").expect("ArrayIndex instances missing");
+        assert_eq!(instances.len(), 4);
+
+        let mut typeinf = calvin_core::lang::typeinf::TypeInference::with_env_and_classes(
+            &ctx,
+            env.clone(),
+            registry.clone(),
+        );
+        let ast = calvin_parse::parse_expr(&ctx, "arrayIndexFrom").expect("parse failed");
+        let ty = typeinf.visit(ast).expect("infer failed");
+        typeinf.solve_constraints().expect("solve failed");
+        let residuals = typeinf.residual_constraints();
+        let formatted = calvin_core::lang::types::format_qual_type(ty, &residuals);
+        assert_eq!(formatted, "ArrayIndex a => (a) -> long");
+
+        // Application to concrete int literal: arrayIndexFrom 42
+        let mut typeinf2 = calvin_core::lang::typeinf::TypeInference::with_env_and_classes(
+            &ctx,
+            env.clone(),
+            registry.clone(),
+        );
+        let ast2 = calvin_parse::parse_expr(&ctx, "arrayIndexFrom 42").expect("parse failed");
+        let ty2 = typeinf2.visit(ast2).expect("infer failed");
+        typeinf2.solve_constraints().expect("solve failed");
+        let residuals2 = typeinf2.residual_constraints();
+        let formatted2 = calvin_core::lang::types::format_qual_type(ty2, &residuals2);
+        assert_eq!(formatted2, "long");
     }
 }

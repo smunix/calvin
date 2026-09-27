@@ -330,4 +330,20 @@ mod tests {
         assert_eq!(compiler.eval_dynamic("toLower 'Z'").unwrap(), "'z'");
         assert_eq!(compiler.eval_dynamic("toLower('Z')").unwrap(), "'z'");
     }
+
+    #[test]
+    fn test_type_of_array_index_from() {
+        let ctx = TypeContext::new();
+        let mut compiler_llvm = Compiler::new(&ctx, BackendChoice::Llvm);
+        assert_eq!(
+            compiler_llvm.type_of("arrayIndexFrom").unwrap(),
+            "ArrayIndex a => (a) -> long"
+        );
+
+        let mut compiler_cl = Compiler::new(&ctx, BackendChoice::Cranelift);
+        assert_eq!(
+            compiler_cl.type_of("arrayIndexFrom").unwrap(),
+            "ArrayIndex a => (a) -> long"
+        );
+    }
 }
