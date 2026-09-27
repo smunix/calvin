@@ -15,7 +15,7 @@ use inkwell::targets::{InitializationConfig, Target};
 
 use crate::types::lower_type;
 use calvin_core::lang::expr::{Expr, ExprVisitor, Literal, Pattern};
-use calvin_core::lang::types::MonoType;
+use calvin_core::lang::types::{MonoType, Prim};
 
 pub struct LLVMCompiler<'ctx, 'ast> {
     pub context: &'ctx Context,
@@ -95,7 +95,33 @@ impl<'ctx, 'ast> LLVMCompiler<'ctx, 'ast> {
             fn_defs: &self.fn_defs,
         };
 
-        let ret_val = lower_ctx.visit(expr);
+        let mut ret_val = lower_ctx.visit(expr);
+        let is_float = matches!(
+            ty.chase(),
+            calvin_core::lang::types::MonoType::Prim(
+                calvin_core::lang::types::Prim::Double | calvin_core::lang::types::Prim::Float
+            )
+        );
+        if is_float && ret_val.is_int_value() {
+            ret_val = self
+                .builder
+                .build_signed_int_to_float(
+                    ret_val.into_int_value(),
+                    self.context.f64_type(),
+                    "sitofp",
+                )
+                .unwrap()
+                .into();
+        } else if !is_float && ret_val.is_int_value() {
+            let iv = ret_val.into_int_value();
+            if iv.get_type().get_bit_width() < 64 {
+                ret_val = self
+                    .builder
+                    .build_int_z_extend(iv, self.context.i64_type(), "zext")
+                    .unwrap()
+                    .into();
+            }
+        }
         self.builder.build_return(Some(&ret_val)).unwrap();
 
         self.fpm.run_on(&function);
@@ -146,7 +172,17 @@ impl<'ctx, 'ast> LLVMCompiler<'ctx, 'ast> {
         };
 
         let mut ret_val = lower_ctx.visit(expr);
-        if !is_float && ret_val.is_int_value() {
+        if is_float && ret_val.is_int_value() {
+            ret_val = self
+                .builder
+                .build_signed_int_to_float(
+                    ret_val.into_int_value(),
+                    self.context.f64_type(),
+                    "sitofp",
+                )
+                .unwrap()
+                .into();
+        } else if !is_float && ret_val.is_int_value() {
             let iv = ret_val.into_int_value();
             if iv.get_type().get_bit_width() < 64 {
                 ret_val = self
@@ -195,6 +231,41 @@ impl<'a, 'ctx, 'ast> LoweringContext<'a, 'ctx, 'ast> {
             r = self.builder.build_int_s_extend(r, l.get_type(), "sext").unwrap();
         }
         (l, r)
+    }
+
+    fn reconcile_types(
+        &self,
+        lhs: BasicValueEnum<'ctx>,
+        rhs: BasicValueEnum<'ctx>,
+    ) -> (BasicValueEnum<'ctx>, BasicValueEnum<'ctx>) {
+        if lhs.is_float_value() && rhs.is_float_value() {
+            (lhs, rhs)
+        } else if lhs.is_int_value() && rhs.is_int_value() {
+            let (l, r) = self.reconcile_int_types(lhs.into_int_value(), rhs.into_int_value());
+            (l.into(), r.into())
+        } else if lhs.is_float_value() && rhs.is_int_value() {
+            let r_f = self
+                .builder
+                .build_signed_int_to_float(
+                    rhs.into_int_value(),
+                    self.context.f64_type(),
+                    "sitofp",
+                )
+                .unwrap();
+            (lhs, r_f.into())
+        } else if lhs.is_int_value() && rhs.is_float_value() {
+            let l_f = self
+                .builder
+                .build_signed_int_to_float(
+                    lhs.into_int_value(),
+                    self.context.f64_type(),
+                    "sitofp",
+                )
+                .unwrap();
+            (l_f.into(), rhs)
+        } else {
+            (lhs, rhs)
+        }
     }
 }
 
@@ -287,6 +358,104 @@ impl<'a, 'ctx, 'ast> ExprVisitor<'ast, BasicValueEnum<'ctx>> for LoweringContext
                     .into();
             }
 
+            // Unary conversions & identity
+            if flat_args.len() == 1 {
+                match *op {
+                    "id" | "convert" => {
+                        return self.visit(flat_args[0]);
+                    }
+                    "i2d" | "l2d" => {
+                        let arg_val = self.visit(flat_args[0]);
+                        return if arg_val.is_int_value() {
+                            self.builder
+                                .build_signed_int_to_float(
+                                    arg_val.into_int_value(),
+                                    self.context.f64_type(),
+                                    "sitofp",
+                                )
+                                .unwrap()
+                                .into()
+                        } else {
+                            arg_val
+                        };
+                    }
+                    "i2f" | "l2f" => {
+                        let arg_val = self.visit(flat_args[0]);
+                        return if arg_val.is_int_value() {
+                            self.builder
+                                .build_signed_int_to_float(
+                                    arg_val.into_int_value(),
+                                    self.context.f32_type(),
+                                    "sitofp",
+                                )
+                                .unwrap()
+                                .into()
+                        } else {
+                            arg_val
+                        };
+                    }
+                    "f2d" => {
+                        let arg_val = self.visit(flat_args[0]);
+                        return if arg_val.is_float_value() {
+                            let fv = arg_val.into_float_value();
+                            if fv.get_type() == self.context.f32_type() {
+                                self.builder
+                                    .build_float_ext(fv, self.context.f64_type(), "fpext")
+                                    .unwrap()
+                                    .into()
+                            } else {
+                                arg_val
+                            }
+                        } else {
+                            arg_val
+                        };
+                    }
+                    "b2i" | "b2l" => {
+                        let arg_val = self.visit(flat_args[0]);
+                        let target_ty = if *op == "b2i" {
+                            self.context.i32_type()
+                        } else {
+                            self.context.i64_type()
+                        };
+                        return if arg_val.is_int_value() {
+                            let iv = arg_val.into_int_value();
+                            if iv.get_type().get_bit_width() < target_ty.get_bit_width() {
+                                self.builder
+                                    .build_int_z_extend(iv, target_ty, "zext")
+                                    .unwrap()
+                                    .into()
+                            } else {
+                                arg_val
+                            }
+                        } else {
+                            arg_val
+                        };
+                    }
+                    "s2i" | "i2l" | "l2i16" => {
+                        let arg_val = self.visit(flat_args[0]);
+                        let target_ty = match *op {
+                            "s2i" => self.context.i32_type(),
+                            "i2l" => self.context.i64_type(),
+                            _ => self.context.i128_type(),
+                        };
+                        return if arg_val.is_int_value() {
+                            let iv = arg_val.into_int_value();
+                            if iv.get_type().get_bit_width() < target_ty.get_bit_width() {
+                                self.builder
+                                    .build_int_s_extend(iv, target_ty, "sext")
+                                    .unwrap()
+                                    .into()
+                            } else {
+                                arg_val
+                            }
+                        } else {
+                            arg_val
+                        };
+                    }
+                    _ => {}
+                }
+            }
+
             // Binary logical operators: and, or
             if flat_args.len() == 2 && matches!(*op, "and" | "or") {
                 let lhs = self.visit(flat_args[0]).into_int_value();
@@ -303,6 +472,7 @@ impl<'a, 'ctx, 'ast> ExprVisitor<'ast, BasicValueEnum<'ctx>> for LoweringContext
             if flat_args.len() == 2 && matches!(*op, "==" | "!=" | "===" | "!==" | "<" | "<=" | ">" | ">=" | "~") {
                 let lhs = self.visit(flat_args[0]);
                 let rhs = self.visit(flat_args[1]);
+                let (lhs, rhs) = self.reconcile_types(lhs, rhs);
                 if lhs.is_float_value() {
                     let l = lhs.into_float_value();
                     let r = rhs.into_float_value();
@@ -323,7 +493,6 @@ impl<'a, 'ctx, 'ast> ExprVisitor<'ast, BasicValueEnum<'ctx>> for LoweringContext
                 } else {
                     let l = lhs.into_int_value();
                     let r = rhs.into_int_value();
-                    let (l, r) = self.reconcile_int_types(l, r);
                     let pred = match *op {
                         "==" | "===" | "~" => inkwell::IntPredicate::EQ,
                         "!=" | "!==" => inkwell::IntPredicate::NE,
@@ -350,6 +519,7 @@ impl<'a, 'ctx, 'ast> ExprVisitor<'ast, BasicValueEnum<'ctx>> for LoweringContext
                 }
                 let lhs = self.visit(flat_args[0]);
                 let rhs = self.visit(flat_args[1]);
+                let (lhs, rhs) = self.reconcile_types(lhs, rhs);
 
                 if lhs.is_float_value() {
                     let l = lhs.into_float_value();
@@ -365,7 +535,6 @@ impl<'a, 'ctx, 'ast> ExprVisitor<'ast, BasicValueEnum<'ctx>> for LoweringContext
                 } else {
                     let l = lhs.into_int_value();
                     let r = rhs.into_int_value();
-                    let (l, r) = self.reconcile_int_types(l, r);
                     let res = match *op {
                         "+" => self.builder.build_int_add(l, r, "addtmp").unwrap(),
                         "-" => self.builder.build_int_sub(l, r, "subtmp").unwrap(),
@@ -815,9 +984,88 @@ impl<'a, 'ctx, 'ast> ExprVisitor<'ast, BasicValueEnum<'ctx>> for LoweringContext
     fn visit_annotate(
         &mut self,
         expr: &'ast Expr<'ast>,
-        _ty: &'ast MonoType<'ast>,
+        ty: &'ast MonoType<'ast>,
     ) -> BasicValueEnum<'ctx> {
-        self.visit(expr)
+        let val = self.visit(expr);
+        match ty.chase() {
+            MonoType::Prim(Prim::Double | Prim::Float) => {
+                if val.is_int_value() {
+                    let target_float_ty = if matches!(ty.chase(), MonoType::Prim(Prim::Float)) {
+                        self.context.f32_type()
+                    } else {
+                        self.context.f64_type()
+                    };
+                    self.builder
+                        .build_signed_int_to_float(val.into_int_value(), target_float_ty, "sitofp")
+                        .unwrap()
+                        .into()
+                } else if val.is_float_value() {
+                    let fv = val.into_float_value();
+                    if matches!(ty.chase(), MonoType::Prim(Prim::Double)) && fv.get_type() == self.context.f32_type() {
+                        self.builder
+                            .build_float_ext(fv, self.context.f64_type(), "fpext")
+                            .unwrap()
+                            .into()
+                    } else if matches!(ty.chase(), MonoType::Prim(Prim::Float)) && fv.get_type() == self.context.f64_type() {
+                        self.builder
+                            .build_float_trunc(fv, self.context.f32_type(), "fptrunc")
+                            .unwrap()
+                            .into()
+                    } else {
+                        val
+                    }
+                } else {
+                    val
+                }
+            }
+            MonoType::Prim(Prim::Int | Prim::Long | Prim::Short | Prim::Byte) => {
+                if val.is_float_value() {
+                    let target_int_ty = match ty.chase() {
+                        MonoType::Prim(Prim::Byte) => self.context.i8_type(),
+                        MonoType::Prim(Prim::Short) => self.context.i16_type(),
+                        MonoType::Prim(Prim::Int) => self.context.i32_type(),
+                        MonoType::Prim(Prim::Long) => self.context.i64_type(),
+                        _ => unreachable!(),
+                    };
+                    self.builder
+                        .build_float_to_signed_int(val.into_float_value(), target_int_ty, "fptosi")
+                        .unwrap()
+                        .into()
+                } else if val.is_int_value() {
+                    let iv = val.into_int_value();
+                    let target_bits = match ty.chase() {
+                        MonoType::Prim(Prim::Byte) => 8,
+                        MonoType::Prim(Prim::Short) => 16,
+                        MonoType::Prim(Prim::Int) => 32,
+                        MonoType::Prim(Prim::Long) => 64,
+                        _ => unreachable!(),
+                    };
+                    let cur_bits = iv.get_type().get_bit_width();
+                    let target_int_ty = match target_bits {
+                        8 => self.context.i8_type(),
+                        16 => self.context.i16_type(),
+                        32 => self.context.i32_type(),
+                        _ => self.context.i64_type(),
+                    };
+                    if cur_bits < target_bits {
+                        self.builder
+                            .build_int_s_extend(iv, target_int_ty, "sext")
+                            .unwrap()
+                            .into()
+                    } else if cur_bits > target_bits {
+                        self.builder
+                            .build_int_truncate(iv, target_int_ty, "trunc")
+                            .unwrap()
+                            .into()
+                    } else {
+                        val
+                    }
+                } else {
+                    val
+                }
+            }
+            _ => val,
+        }
     }
 }
 

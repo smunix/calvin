@@ -10,7 +10,7 @@ use cranelift_module::{FuncId, Linkage, Module};
 
 use crate::types::lower_type;
 use calvin_core::lang::expr::{Expr, ExprVisitor, Literal, Pattern};
-use calvin_core::lang::types::MonoType;
+use calvin_core::lang::types::{MonoType, Prim};
 
 pub struct JITCompiler<'ctx> {
     module: JITModule,
@@ -291,6 +291,71 @@ impl<'a, 'm, 'ctx> ExprVisitor<'ctx, ir::Value> for LoweringContext<'a, 'm, 'ctx
                 let val_ty = self.builder.func.dfg.value_type(arg_val);
                 let zero = self.builder.ins().iconst(val_ty, 0);
                 return self.builder.ins().icmp(ir::condcodes::IntCC::Equal, arg_val, zero);
+            }
+
+            // Unary conversions & identity
+            if flat_args.len() == 1 {
+                match *op {
+                    "id" | "convert" => {
+                        return self.visit(flat_args[0]);
+                    }
+                    "i2d" | "l2d" => {
+                        let arg_val = self.visit(flat_args[0]);
+                        let val_ty = self.builder.func.dfg.value_type(arg_val);
+                        return if val_ty.is_int() {
+                            self.builder.ins().fcvt_from_sint(ir::types::F64, arg_val)
+                        } else {
+                            arg_val
+                        };
+                    }
+                    "i2f" | "l2f" => {
+                        let arg_val = self.visit(flat_args[0]);
+                        let val_ty = self.builder.func.dfg.value_type(arg_val);
+                        return if val_ty.is_int() {
+                            self.builder.ins().fcvt_from_sint(ir::types::F32, arg_val)
+                        } else {
+                            arg_val
+                        };
+                    }
+                    "f2d" => {
+                        let arg_val = self.visit(flat_args[0]);
+                        let val_ty = self.builder.func.dfg.value_type(arg_val);
+                        return if val_ty == ir::types::F32 {
+                            self.builder.ins().fpromote(ir::types::F64, arg_val)
+                        } else {
+                            arg_val
+                        };
+                    }
+                    "b2i" | "b2l" => {
+                        let arg_val = self.visit(flat_args[0]);
+                        let target_ty = if *op == "b2i" {
+                            ir::types::I32
+                        } else {
+                            ir::types::I64
+                        };
+                        let val_ty = self.builder.func.dfg.value_type(arg_val);
+                        return if val_ty.is_int() && val_ty.bits() < target_ty.bits() {
+                            self.builder.ins().uextend(target_ty, arg_val)
+                        } else {
+                            arg_val
+                        };
+                    }
+                    "s2i" | "i2l" | "l2i16" => {
+                        let arg_val = self.visit(flat_args[0]);
+                        let target_ty = match *op {
+                            "s2i" => ir::types::I32,
+                            "i2l" => ir::types::I64,
+                            _ => ir::types::I128,
+                        };
+                        let val_ty = self.builder.func.dfg.value_type(arg_val);
+                        return if val_ty.is_int() && val_ty.bits() < target_ty.bits() {
+                            self.builder.ins().sextend(target_ty, arg_val)
+                        } else {
+                            arg_val
+                        };
+                    }
+                    _ => {}
+                }
             }
 
             // Binary logical operators: and, or
@@ -668,9 +733,55 @@ impl<'a, 'm, 'ctx> ExprVisitor<'ctx, ir::Value> for LoweringContext<'a, 'm, 'ctx
     fn visit_annotate(
         &mut self,
         expr: &'ctx Expr<'ctx>,
-        _ty: &'ctx MonoType<'ctx>,
+        ty: &'ctx MonoType<'ctx>,
     ) -> ir::Value {
-        self.visit(expr)
+        let val = self.visit(expr);
+        let val_ty = self.builder.func.dfg.value_type(val);
+        match ty.chase() {
+            MonoType::Prim(Prim::Double | Prim::Float) => {
+                let target_ty = if matches!(ty.chase(), MonoType::Prim(Prim::Float)) {
+                    ir::types::F32
+                } else {
+                    ir::types::F64
+                };
+                if val_ty.is_int() {
+                    self.builder.ins().fcvt_from_sint(target_ty, val)
+                } else if val_ty.is_float() {
+                    if val_ty == ir::types::F32 && target_ty == ir::types::F64 {
+                        self.builder.ins().fpromote(ir::types::F64, val)
+                    } else if val_ty == ir::types::F64 && target_ty == ir::types::F32 {
+                        self.builder.ins().fdemote(ir::types::F32, val)
+                    } else {
+                        val
+                    }
+                } else {
+                    val
+                }
+            }
+            MonoType::Prim(Prim::Int | Prim::Long | Prim::Short | Prim::Byte) => {
+                let target_ty = match ty.chase() {
+                    MonoType::Prim(Prim::Byte) => ir::types::I8,
+                    MonoType::Prim(Prim::Short) => ir::types::I16,
+                    MonoType::Prim(Prim::Int) => ir::types::I32,
+                    MonoType::Prim(Prim::Long) => ir::types::I64,
+                    _ => unreachable!(),
+                };
+                if val_ty.is_float() {
+                    self.builder.ins().fcvt_to_sint(target_ty, val)
+                } else if val_ty.is_int() {
+                    if val_ty.bits() < target_ty.bits() {
+                        self.builder.ins().sextend(target_ty, val)
+                    } else if val_ty.bits() > target_ty.bits() {
+                        self.builder.ins().ireduce(target_ty, val)
+                    } else {
+                        val
+                    }
+                } else {
+                    val
+                }
+            }
+            _ => val,
+        }
     }
 }
 

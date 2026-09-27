@@ -202,9 +202,11 @@ fn load_module_defs<'ctx>(
                     if op_name.starts_with('(') && op_name.ends_with(')') && op_name.len() >= 3 {
                         op_name = &op_name[1..op_name.len() - 1];
                     }
-                    fn_defs.insert(op_name.to_string(), fn_expr);
-                    if op_name != vd.name {
-                        fn_defs.insert(vd.name.to_string(), fn_expr);
+                    if inst_def.class_name != "Convert" {
+                        fn_defs.insert(op_name.to_string(), fn_expr);
+                        if op_name != vd.name {
+                            fn_defs.insert(vd.name.to_string(), fn_expr);
+                        }
                     }
                 }
             }

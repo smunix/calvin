@@ -380,5 +380,31 @@ mod tests {
         );
         assert!(compiler_cl.type_of("convert(1.2) :: ()").is_err());
     }
+
+    #[test]
+    fn test_eval_convert_llvm() {
+        let ctx = TypeContext::new();
+        let mut compiler = Compiler::new(&ctx, BackendChoice::Llvm);
+        assert_eq!(compiler.eval_dynamic("convert 1 :: double").unwrap(), "1");
+        assert_eq!(compiler.eval_dynamic("convert(1) :: double").unwrap(), "1");
+        assert_eq!(compiler.eval_dynamic("convert 1 :: long").unwrap(), "1");
+        assert_eq!(
+            compiler.eval_dynamic("(convert 1 :: double) + 2.5").unwrap(),
+            "3.5"
+        );
+    }
+
+    #[test]
+    fn test_eval_convert_cranelift() {
+        let ctx = TypeContext::new();
+        let mut compiler = Compiler::new(&ctx, BackendChoice::Cranelift);
+        assert_eq!(compiler.eval_dynamic("convert 1 :: double").unwrap(), "1");
+        assert_eq!(compiler.eval_dynamic("convert(1) :: double").unwrap(), "1");
+        assert_eq!(compiler.eval_dynamic("convert 1 :: long").unwrap(), "1");
+        assert_eq!(
+            compiler.eval_dynamic("(convert 1 :: double) + 2.5").unwrap(),
+            "3.5"
+        );
+    }
 }
 
