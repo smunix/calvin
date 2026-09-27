@@ -84,6 +84,7 @@ pub fn expr_parser<'a, 'ctx, I>(
 ) -> impl Parser<'a, I, &'ctx Expr<'ctx>, ParseError<'a>> + Clone
 where
     'a: 'ctx,
+    'ctx: 'a,
     I: chumsky::input::ValueInput<'a, Token = Token<'a>, Span = Span>,
 {
     recursive(|expr| {
@@ -159,7 +160,7 @@ where
             array,
             record,
             variant,
-            tuple_or_paren,
+            tuple_or_paren.clone(),
         ));
 
         enum Postfix<'a, 'ctx> {
@@ -195,7 +196,7 @@ where
                     }
                 }
             },
-        );
+        ).boxed();
 
         let atom_annotated = atom_postfix
             .then(just(Token::DoubleColon).ignore_then(type_expr_parser()).or_not())
@@ -204,9 +205,11 @@ where
                 None => e,
             });
 
+        let app_arg = choice((atom_literal, tuple_or_paren.clone()));
+
         let app = atom_annotated
             .clone()
-            .then(atom_annotated.clone().repeated().collect::<Vec<_>>())
+            .then(app_arg.repeated().collect::<Vec<_>>())
             .map(move |(f, args)| {
                 if args.is_empty() {
                     f
@@ -214,7 +217,8 @@ where
                     let args_slice = ctx.alloc_slice_clone(&args);
                     &*ctx.alloc(Expr::App(f, args_slice))
                 }
-            });
+            })
+            .boxed();
 
         let op_mul = app.clone().foldl(
             choice((
@@ -230,7 +234,7 @@ where
                     ctx.alloc_slice_clone(&[lhs, rhs]),
                 ))
             },
-        );
+        ).boxed();
 
         let op_add = op_mul.clone().foldl(
             choice((
@@ -246,7 +250,7 @@ where
                     ctx.alloc_slice_clone(&[lhs, rhs]),
                 ))
             },
-        );
+        ).boxed();
 
         let op_rel = op_add.clone().foldl(
             choice((
@@ -268,7 +272,7 @@ where
                     ctx.alloc_slice_clone(&[lhs, rhs]),
                 ))
             },
-        );
+        ).boxed();
 
         let op_and = op_rel.clone().foldl(
             just(Token::And)
@@ -281,7 +285,7 @@ where
                     ctx.alloc_slice_clone(&[lhs, rhs]),
                 ))
             },
-        );
+        ).boxed();
 
         let op_or = op_and.clone().foldl(
             just(Token::Or)
@@ -294,7 +298,7 @@ where
                     ctx.alloc_slice_clone(&[lhs, rhs]),
                 ))
             },
-        );
+        ).boxed();
 
         let pat = pattern_parser(ctx);
 
@@ -446,6 +450,7 @@ pub fn module_parser<'a, 'ctx, I>(
 ) -> impl Parser<'a, I, Module<'ctx>, ParseError<'a>> + Clone
 where
     'a: 'ctx,
+    'ctx: 'a,
     I: chumsky::input::ValueInput<'a, Token = Token<'a>, Span = Span>,
 {
     let type_expr = type_expr_parser();
@@ -532,7 +537,7 @@ where
         .then(select! { Token::Ident(name) => name }.repeated().collect::<Vec<_>>())
         .then(fundeps.or_not())
         .then_ignore(just(Token::Where))
-        .then(cmember.repeated().collect::<Vec<_>>())
+        .then(cmember.clone().repeated().collect::<Vec<_>>())
         .map(|(((name, params), fds), members)| {
             ModuleDef::Class(ClassDef {
                 name,
@@ -566,7 +571,7 @@ where
         .then(expr.clone())
         .map(|((name, args), body)| VarDef { name, args, body });
 
-    let imember = choice((op_member, fn_member));
+    let imember = choice((op_member.clone(), fn_member.clone()));
 
     let instance_def = just(Token::Instance)
         .ignore_then(inst_context.or_not())
@@ -660,11 +665,25 @@ toLower c = if (c >= 'A' and c <= 'Z') then ((c - 'A') + 'a') else c
     }
 
     #[test]
+    fn test_parse_lcase_sig() {
+        let ctx = TypeContext::new();
+        let src = r#"
+toLower :: char -> char
+toLower c = if (c >= 'A' and c <= 'Z') then ((c - 'A') + 'a') else c
+
+lcase :: (Array cs char) => cs -> [char]
+lcase cs = map(toLower, cs[0:])
+"#;
+        let module = parse_module(&ctx, src).expect("failed to parse lcase");
+        assert_eq!(module.defs.len(), 4);
+    }
+
+    #[test]
     fn test_parse_strings_hob() {
         let ctx = TypeContext::new();
         let src = include_str!("../../calvin-boot/boot/strings.hob");
         let module = parse_module(&ctx, src).expect("failed to parse strings.hob");
-        assert!(!module.defs.is_empty());
+        assert_eq!(module.defs.len(), 9);
     }
 }
 

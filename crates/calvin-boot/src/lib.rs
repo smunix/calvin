@@ -18,7 +18,7 @@ pub fn boot_script(name: &str) -> Option<&'static str> {
 }
 
 fn init_builtin_env<'ctx>(ctx: &'ctx TypeContext, base_env: &mut TypeEnv<'ctx>) {
-    let bool_ty = ctx.alloc(MonoType::Prim(Prim::Bool));
+    let bool_ty: &'ctx MonoType<'ctx> = &*ctx.alloc(MonoType::Prim(Prim::Bool));
     let tup = ctx.alloc(MonoType::Tuple(ctx.arena().alloc_slice_clone(&[bool_ty, bool_ty])));
     let tup_to_bool = ctx.alloc(MonoType::Fn(tup, bool_ty));
     let bool_to_bool = ctx.alloc(MonoType::Fn(bool_ty, bool_ty));
@@ -38,14 +38,9 @@ pub fn init_bootstrap<'ctx>(
     init_builtin_env(ctx, &mut base_env);
 
     // 1. Process all boot scripts in alphabetical order
-    for (name, content) in BOOT_SCRIPTS {
-        match parse_module(ctx, content) {
-            Ok(module) => {
-                load_module_defs(ctx, &module.defs, &mut base_env, &mut registry);
-            }
-            Err(_err) => {
-                // Skip scripts with syntax constructs not yet supported in calvin-parse
-            }
+    for (_name, content) in BOOT_SCRIPTS {
+        if let Ok(module) = parse_module(ctx, content) {
+            load_module_defs(ctx, &module.defs, &mut base_env, &mut registry);
         }
     }
 
@@ -54,7 +49,7 @@ pub fn init_bootstrap<'ctx>(
 
 fn load_module_defs<'ctx>(
     ctx: &'ctx TypeContext,
-    defs: &[ModuleDef],
+    defs: &[ModuleDef<'ctx>],
     base_env: &mut TypeEnv<'ctx>,
     registry: &mut TypeClassRegistry<'ctx>,
 ) {
@@ -149,10 +144,10 @@ fn load_module_defs<'ctx>(
     }
 }
 
-fn lower_var_type_def<'a, 'ctx>(
+fn lower_var_type_def<'ctx>(
     ctx: &'ctx TypeContext,
-    vtd: &VarTypeDef<'a>,
-) -> (&'ctx MonoType<'ctx>, &'a str) {
+    vtd: &VarTypeDef<'ctx>,
+) -> (&'ctx MonoType<'ctx>, &'ctx str) {
     let mut type_vars = Vec::new();
     collect_type_vars(&vtd.ty.ty, &mut type_vars);
     for c in &vtd.ty.context {
