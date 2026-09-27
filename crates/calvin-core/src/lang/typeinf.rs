@@ -150,30 +150,29 @@ impl<'a> TypeInference<'a> {
                     }
                 }
 
-                // Check if input parameters are ground (contain no free type variables)
-                let input_args_closed = match *name {
-                    "Add" | "Subtract" | "Multiply" | "Divide" if args.len() >= 2 => {
-                        !crate::lang::typeclass::has_free_tvars(args[0].chase())
-                            && !crate::lang::typeclass::has_free_tvars(args[1].chase())
-                    }
-                    _ => {
-                        let class_def = self.classes.classes.get(*name);
-                        if let Some(cd) = class_def {
-                            if !cd.fundeps.is_empty() {
-                                cd.fundeps.iter().any(|(from, _)| {
-                                    from.iter().all(|&i| i < args.len() && !crate::lang::typeclass::has_free_tvars(args[i].chase()))
-                                })
+                let is_unsatisfiable = if let Some(explanation) = self.classes.explain_unsatisfiable(name, args) {
+                    Some(Some(explanation))
+                } else {
+                    let class_def = self.classes.classes.get(*name);
+                    if let Some(cd) = class_def {
+                        if !cd.fundeps.is_empty() {
+                            let from_closed = cd.fundeps.iter().any(|(from, _)| {
+                                from.iter().all(|&i| i < args.len() && !crate::lang::typeclass::has_free_tvars(args[i].chase()))
+                            });
+                            if from_closed {
+                                Some(None)
                             } else {
-                                args.iter().all(|arg| !crate::lang::typeclass::has_free_tvars(arg.chase()))
+                                None
                             }
                         } else {
-                            args.iter().all(|arg| !crate::lang::typeclass::has_free_tvars(arg.chase()))
+                            None
                         }
+                    } else {
+                        None
                     }
                 };
 
-                if input_args_closed {
-                    let explanation = self.classes.explain_unsatisfiable(name, args);
+                if let Some(explanation) = is_unsatisfiable {
                     let arg_strs: Vec<String> = args
                         .iter()
                         .map(|arg| {

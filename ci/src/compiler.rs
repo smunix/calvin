@@ -355,12 +355,30 @@ mod tests {
             compiler_llvm.type_of("convert").unwrap(),
             "Convert a b => (a) -> b"
         );
+        assert_eq!(
+            compiler_llvm.type_of("convert 1.2 :: int").unwrap(),
+            "Convert double int => int"
+        );
+        assert_eq!(
+            compiler_llvm.type_of("convert(1.2) :: int").unwrap(),
+            "Convert double int => int"
+        );
+        assert!(compiler_llvm.type_of("convert(1.2) :: ()").is_err());
 
         let mut compiler_cl = Compiler::new(&ctx, BackendChoice::Cranelift);
         assert_eq!(
             compiler_cl.type_of("convert").unwrap(),
             "Convert a b => (a) -> b"
         );
+        assert_eq!(
+            compiler_cl.type_of("convert 1.2 :: int").unwrap(),
+            "Convert double int => int"
+        );
+        assert_eq!(
+            compiler_cl.type_of("convert(1.2) :: int").unwrap(),
+            "Convert double int => int"
+        );
+        assert!(compiler_cl.type_of("convert(1.2) :: ()").is_err());
     }
 }
 

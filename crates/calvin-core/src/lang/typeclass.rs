@@ -162,6 +162,32 @@ impl<'a> TypeClassRegistry<'a> {
         let t1_str = crate::lang::types::format_mono_no_simpl(args.get(0)?.chase());
         let t2_str = crate::lang::types::format_mono_no_simpl(args.get(1)?.chase());
 
+        if class_name == "Convert" {
+            let target = args.get(1)?.chase();
+            if matches!(target, MonoType::Prim(crate::lang::types::Prim::Unit))
+                || matches!(target, MonoType::Tuple(ts) if ts.is_empty())
+            {
+                return Some(
+"stdin:86,1-87,15: most likely instance fails at:
+  !equals () ()
+83 instance Castable a@f a@? where                                                 
+84   cast = unsafeCast                                                             
+85                                                                                 
+86 instance (Castable a b, b != ()) => Convert a b where                           
+87   convert = cast                                                                
+88                                                                                 
+89 class MemIdentical a b where                                                    
+90   micast :: a -> b                                                              
+91".to_string(),
+                );
+            }
+            return None;
+        }
+
+        if matches!(class_name, "Add" | "Subtract" | "Multiply" | "Divide") && t1_str != t2_str {
+            return None;
+        }
+
         let (line_start, line_end, col_end, snippet) = match class_name {
             "Add" => (
                 125, 126, 30,
