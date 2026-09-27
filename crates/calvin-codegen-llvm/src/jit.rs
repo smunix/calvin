@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::rc::Rc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use inkwell::builder::Builder;
@@ -16,16 +17,17 @@ use crate::types::lower_type;
 use calvin_core::lang::expr::{Expr, ExprVisitor, Literal, Pattern};
 use calvin_core::lang::types::MonoType;
 
-pub struct LLVMCompiler<'ctx> {
+pub struct LLVMCompiler<'ctx, 'ast> {
     pub context: &'ctx Context,
     pub module: Module<'ctx>,
     pub builder: Builder<'ctx>,
     pub execution_engine: ExecutionEngine<'ctx>,
     pub fpm: PassManager<FunctionValue<'ctx>>,
     counter: AtomicUsize,
+    pub fn_defs: Rc<HashMap<String, &'ast Expr<'ast>>>,
 }
 
-impl<'ctx> LLVMCompiler<'ctx> {
+impl<'ctx, 'ast> LLVMCompiler<'ctx, 'ast> {
     pub fn new(context: &'ctx Context) -> Self {
         Target::initialize_native(&InitializationConfig::default())
             .expect("Failed to initialize native target for LLVM JIT");
@@ -60,13 +62,19 @@ impl<'ctx> LLVMCompiler<'ctx> {
             execution_engine,
             fpm,
             counter: AtomicUsize::new(0),
+            fn_defs: Rc::new(HashMap::new()),
         }
     }
 
-    pub fn compile_and_dump_ir<'a>(
+    pub fn with_fn_defs(mut self, fn_defs: Rc<HashMap<String, &'ast Expr<'ast>>>) -> Self {
+        self.fn_defs = fn_defs;
+        self
+    }
+
+    pub fn compile_and_dump_ir(
         &self,
-        expr: &'a Expr<'a>,
-        ty: &'a MonoType<'a>,
+        expr: &'ast Expr<'ast>,
+        ty: &'ast MonoType<'ast>,
     ) -> String {
         let fn_name = format!("anon_expr_dump_{}", self.counter.fetch_add(1, Ordering::SeqCst));
         let ret_type = lower_type(self.context, ty);
@@ -84,6 +92,7 @@ impl<'ctx> LLVMCompiler<'ctx> {
             module: &self.module,
             alloc_func,
             vars: HashMap::new(),
+            fn_defs: &self.fn_defs,
         };
 
         let ret_val = lower_ctx.visit(expr);
@@ -93,33 +102,67 @@ impl<'ctx> LLVMCompiler<'ctx> {
         function.print_to_string().to_string()
     }
 
-    pub fn compile_expr<'a, T>(
+    pub fn compile_expr<T>(
         &self,
-        expr: &'a Expr<'a>,
-        ty: &'a MonoType<'a>,
+        expr: &'ast Expr<'ast>,
+        ty: &'ast MonoType<'ast>,
     ) -> JitFunction<'ctx, unsafe extern "C" fn() -> T> {
         let fn_name = format!("anon_expr_{}", self.counter.fetch_add(1, Ordering::SeqCst));
-        let ret_type = lower_type(self.context, ty);
+        let is_float = matches!(
+            ty.chase(),
+            calvin_core::lang::types::MonoType::Prim(
+                calvin_core::lang::types::Prim::Double | calvin_core::lang::types::Prim::Float
+            )
+        );
+        let ret_type: inkwell::types::BasicTypeEnum = if is_float {
+            self.context.f64_type().into()
+        } else {
+            self.context.i64_type().into()
+        };
         let fn_type = ret_type.fn_type(&[], false);
 
-        let function = self.module.add_function(&fn_name, fn_type, None);
+        let expr_module = self.context.create_module(&fn_name);
+
+        let i64_type = self.context.i64_type();
+        let ptr_type = self.context.ptr_type(inkwell::AddressSpace::default());
+        let alloc_fn_type = ptr_type.fn_type(&[i64_type.into(), i64_type.into()], false);
+        let alloc_func = expr_module.add_function(
+            "calvin_alloc",
+            alloc_fn_type,
+            Some(inkwell::module::Linkage::External),
+        );
+
+        let function = expr_module.add_function(&fn_name, fn_type, None);
         let basic_block = self.context.append_basic_block(function, "entry");
         self.builder.position_at_end(basic_block);
-
-        let alloc_func = self.module.get_function("calvin_alloc").unwrap();
 
         let mut lower_ctx = LoweringContext {
             context: self.context,
             builder: &self.builder,
-            module: &self.module,
+            module: &expr_module,
             alloc_func,
             vars: HashMap::new(),
+            fn_defs: &self.fn_defs,
         };
 
-        let ret_val = lower_ctx.visit(expr);
+        let mut ret_val = lower_ctx.visit(expr);
+        if !is_float && ret_val.is_int_value() {
+            let iv = ret_val.into_int_value();
+            if iv.get_type().get_bit_width() < 64 {
+                ret_val = self
+                    .builder
+                    .build_int_z_extend(iv, self.context.i64_type(), "zext")
+                    .unwrap()
+                    .into();
+            }
+        }
         self.builder.build_return(Some(&ret_val)).unwrap();
 
-        self.fpm.run_on(&function);
+        self.execution_engine.add_module(&expr_module).unwrap();
+        self.execution_engine.add_global_mapping(
+            &alloc_func,
+            calvin_core::runtime::region::calvin_alloc as *const () as usize,
+        );
 
         unsafe {
             self.execution_engine
@@ -129,16 +172,34 @@ impl<'ctx> LLVMCompiler<'ctx> {
     }
 }
 
-struct LoweringContext<'a, 'ctx> {
+struct LoweringContext<'a, 'ctx, 'ast> {
     context: &'ctx Context,
     builder: &'a Builder<'ctx>,
     alloc_func: FunctionValue<'ctx>,
     module: &'a Module<'ctx>,
     vars: HashMap<String, BasicValueEnum<'ctx>>,
+    fn_defs: &'a HashMap<String, &'ast Expr<'ast>>,
 }
 
-impl<'a, 'ctx, 'expr> ExprVisitor<'expr, BasicValueEnum<'ctx>> for LoweringContext<'a, 'ctx> {
-    fn visit_literal(&mut self, lit: &Literal<'expr>) -> BasicValueEnum<'ctx> {
+impl<'a, 'ctx, 'ast> LoweringContext<'a, 'ctx, 'ast> {
+    fn reconcile_int_types(
+        &self,
+        mut l: inkwell::values::IntValue<'ctx>,
+        mut r: inkwell::values::IntValue<'ctx>,
+    ) -> (inkwell::values::IntValue<'ctx>, inkwell::values::IntValue<'ctx>) {
+        let l_bits = l.get_type().get_bit_width();
+        let r_bits = r.get_type().get_bit_width();
+        if l_bits < r_bits {
+            l = self.builder.build_int_s_extend(l, r.get_type(), "sext").unwrap();
+        } else if r_bits < l_bits {
+            r = self.builder.build_int_s_extend(r, l.get_type(), "sext").unwrap();
+        }
+        (l, r)
+    }
+}
+
+impl<'a, 'ctx, 'ast> ExprVisitor<'ast, BasicValueEnum<'ctx>> for LoweringContext<'a, 'ctx, 'ast> {
+    fn visit_literal(&mut self, lit: &Literal<'ast>) -> BasicValueEnum<'ctx> {
         match lit {
             Literal::Int(n) => self.context.i64_type().const_int(*n as u64, false).into(),
             Literal::Float(f) | Literal::Double(f) => self.context.f64_type().const_float(*f).into(),
@@ -147,20 +208,27 @@ impl<'a, 'ctx, 'expr> ExprVisitor<'expr, BasicValueEnum<'ctx>> for LoweringConte
                 .bool_type()
                 .const_int(if *b { 1 } else { 0 }, false)
                 .into(),
+            Literal::Char(c) => self.context.i32_type().const_int(*c as u64, false).into(),
             Literal::Unit => self.context.i8_type().const_int(0, false).into(),
             _ => unimplemented!("literal lowering for LLVM"),
         }
     }
 
-    fn visit_var(&mut self, name: &'expr str) -> BasicValueEnum<'ctx> {
-        *self.vars.get(name).expect("unbound variable")
+    fn visit_var(&mut self, name: &'ast str) -> BasicValueEnum<'ctx> {
+        if let Some(val) = self.vars.get(name) {
+            *val
+        } else if let Some(def_expr) = self.fn_defs.get(name) {
+            self.visit(def_expr)
+        } else {
+            panic!("unbound variable: {}", name)
+        }
     }
 
     fn visit_let(
         &mut self,
-        pat: &Pattern<'expr>,
-        def: &'expr Expr<'expr>,
-        body: &'expr Expr<'expr>,
+        pat: &Pattern<'ast>,
+        def: &'ast Expr<'ast>,
+        body: &'ast Expr<'ast>,
     ) -> BasicValueEnum<'ctx> {
         let def_val = self.visit(def);
         let function = self
@@ -183,18 +251,105 @@ impl<'a, 'ctx, 'expr> ExprVisitor<'expr, BasicValueEnum<'ctx>> for LoweringConte
 
     fn visit_app(
         &mut self,
-        f: &'expr Expr<'expr>,
-        args: &'expr [&'expr Expr<'expr>],
+        f: &'ast Expr<'ast>,
+        args: &'ast [&'ast Expr<'ast>],
     ) -> BasicValueEnum<'ctx> {
-        if let Expr::Var(op) = f {
-            if args.len() == 2 && matches!(*op, "+" | "-" | "*" | "/") {
-                if matches!(args[0], Expr::Record(_) | Expr::Tuple(_) | Expr::Array(_))
-                    || matches!(args[1], Expr::Record(_) | Expr::Tuple(_) | Expr::Array(_))
+        // Unroll curried application for immediate closures
+        let mut curr_f = f;
+        let mut all_args = vec![args];
+        while let Expr::App(inner_f, inner_args) = curr_f {
+            all_args.insert(0, inner_args);
+            curr_f = inner_f;
+        }
+
+        let mut flat_args = Vec::new();
+        for arg_group in all_args {
+            for arg in (*arg_group).iter() {
+                flat_args.push(*arg);
+            }
+        }
+
+        if flat_args.len() == 1 {
+            if let Expr::Tuple(elems) = flat_args[0] {
+                flat_args = elems.to_vec();
+            }
+        }
+
+        if let Expr::Var(op) = curr_f {
+            // Unary operator: not
+            if flat_args.len() == 1 && *op == "not" {
+                let arg_val = self.visit(flat_args[0]).into_int_value();
+                let zero = arg_val.get_type().const_zero();
+                return self
+                    .builder
+                    .build_int_compare(inkwell::IntPredicate::EQ, arg_val, zero, "nottmp")
+                    .unwrap()
+                    .into();
+            }
+
+            // Binary logical operators: and, or
+            if flat_args.len() == 2 && matches!(*op, "and" | "or") {
+                let lhs = self.visit(flat_args[0]).into_int_value();
+                let rhs = self.visit(flat_args[1]).into_int_value();
+                let (lhs, rhs) = self.reconcile_int_types(lhs, rhs);
+                return match *op {
+                    "and" => self.builder.build_and(lhs, rhs, "andtmp").unwrap().into(),
+                    "or" => self.builder.build_or(lhs, rhs, "ortmp").unwrap().into(),
+                    _ => unreachable!(),
+                };
+            }
+
+            // Binary comparison operators
+            if flat_args.len() == 2 && matches!(*op, "==" | "!=" | "===" | "!==" | "<" | "<=" | ">" | ">=" | "~") {
+                let lhs = self.visit(flat_args[0]);
+                let rhs = self.visit(flat_args[1]);
+                if lhs.is_float_value() {
+                    let l = lhs.into_float_value();
+                    let r = rhs.into_float_value();
+                    let pred = match *op {
+                        "==" | "===" | "~" => inkwell::FloatPredicate::OEQ,
+                        "!=" | "!==" => inkwell::FloatPredicate::ONE,
+                        "<" => inkwell::FloatPredicate::OLT,
+                        "<=" => inkwell::FloatPredicate::OLE,
+                        ">" => inkwell::FloatPredicate::OGT,
+                        ">=" => inkwell::FloatPredicate::OGE,
+                        _ => unreachable!(),
+                    };
+                    return self
+                        .builder
+                        .build_float_compare(pred, l, r, "fcmptmp")
+                        .unwrap()
+                        .into();
+                } else {
+                    let l = lhs.into_int_value();
+                    let r = rhs.into_int_value();
+                    let (l, r) = self.reconcile_int_types(l, r);
+                    let pred = match *op {
+                        "==" | "===" | "~" => inkwell::IntPredicate::EQ,
+                        "!=" | "!==" => inkwell::IntPredicate::NE,
+                        "<" => inkwell::IntPredicate::SLT,
+                        "<=" => inkwell::IntPredicate::SLE,
+                        ">" => inkwell::IntPredicate::SGT,
+                        ">=" => inkwell::IntPredicate::SGE,
+                        _ => unreachable!(),
+                    };
+                    return self
+                        .builder
+                        .build_int_compare(pred, l, r, "icmptmp")
+                        .unwrap()
+                        .into();
+                }
+            }
+
+            // Binary arithmetic operators
+            if flat_args.len() == 2 && matches!(*op, "+" | "-" | "*" | "/" | "%") {
+                if matches!(flat_args[0], Expr::Record(_) | Expr::Tuple(_) | Expr::Array(_))
+                    || matches!(flat_args[1], Expr::Record(_) | Expr::Tuple(_) | Expr::Array(_))
                 {
                     panic!("Attempted arithmetic operator {} on non-primitive pointer", op);
                 }
-                let lhs = self.visit(args[0]);
-                let rhs = self.visit(args[1]);
+                let lhs = self.visit(flat_args[0]);
+                let rhs = self.visit(flat_args[1]);
 
                 if lhs.is_float_value() {
                     let l = lhs.into_float_value();
@@ -210,6 +365,7 @@ impl<'a, 'ctx, 'expr> ExprVisitor<'expr, BasicValueEnum<'ctx>> for LoweringConte
                 } else {
                     let l = lhs.into_int_value();
                     let r = rhs.into_int_value();
+                    let (l, r) = self.reconcile_int_types(l, r);
                     let res = match *op {
                         "+" => self.builder.build_int_add(l, r, "addtmp").unwrap(),
                         "-" => self.builder.build_int_sub(l, r, "subtmp").unwrap(),
@@ -218,31 +374,31 @@ impl<'a, 'ctx, 'expr> ExprVisitor<'expr, BasicValueEnum<'ctx>> for LoweringConte
                             .builder
                             .build_int_signed_div(l, r, "sdivtmp")
                             .unwrap(),
+                        "%" => self
+                            .builder
+                            .build_int_signed_rem(l, r, "sremtmp")
+                            .unwrap(),
                         _ => unreachable!(),
                     };
                     return res.into();
                 }
             }
-        }
 
-        // Unroll curried application for immediate closures
-        let mut curr_f = f;
-        let mut all_args = vec![args];
-        while let Expr::App(inner_f, inner_args) = curr_f {
-            all_args.insert(0, inner_args);
-            curr_f = inner_f;
+            // Look up in fn_defs
+            if let Some(def_expr) = self.fn_defs.get(*op) {
+                curr_f = def_expr;
+                while let Expr::App(inner_f, inner_args) = curr_f {
+                    for arg in (*inner_args).iter().rev() {
+                        flat_args.insert(0, *arg);
+                    }
+                    curr_f = inner_f;
+                }
+            }
         }
 
         if let Expr::Fn(_, _) = curr_f {
             let mut current_closure = curr_f;
             let mut old_vars = Vec::new();
-
-            let mut flat_args = Vec::new();
-            for arg_group in all_args {
-                for arg in (*arg_group).iter() {
-                    flat_args.push(*arg);
-                }
-            }
 
             if flat_args.len() == 1 {
                 if let Expr::Tuple(elems) = flat_args[0] {
@@ -316,7 +472,7 @@ impl<'a, 'ctx, 'expr> ExprVisitor<'expr, BasicValueEnum<'ctx>> for LoweringConte
         unimplemented!("Full application lowering requires environment packing")
     }
 
-    fn visit_tuple(&mut self, exprs: &'expr [&'expr Expr<'expr>]) -> BasicValueEnum<'ctx> {
+    fn visit_tuple(&mut self, exprs: &'ast [&'ast Expr<'ast>]) -> BasicValueEnum<'ctx> {
         let mut vals = Vec::new();
         for e in exprs {
             vals.push(self.visit(e));
@@ -373,7 +529,7 @@ impl<'a, 'ctx, 'expr> ExprVisitor<'expr, BasicValueEnum<'ctx>> for LoweringConte
 
     fn visit_record(
         &mut self,
-        fields: &'expr [(&'expr str, &'expr Expr<'expr>)],
+        fields: &'ast [(&'ast str, &'ast Expr<'ast>)],
     ) -> BasicValueEnum<'ctx> {
         let mut vals = Vec::new();
         for (_, e) in fields {
@@ -429,11 +585,11 @@ impl<'a, 'ctx, 'expr> ExprVisitor<'expr, BasicValueEnum<'ctx>> for LoweringConte
             .into()
     }
 
-    fn visit_array(&mut self, exprs: &'expr [&'expr Expr<'expr>]) -> BasicValueEnum<'ctx> {
+    fn visit_array(&mut self, exprs: &'ast [&'ast Expr<'ast>]) -> BasicValueEnum<'ctx> {
         self.visit_tuple(exprs)
     }
 
-    fn visit_fn(&mut self, pat: &Pattern<'expr>, body: &'expr Expr<'expr>) -> BasicValueEnum<'ctx> {
+    fn visit_fn(&mut self, pat: &Pattern<'ast>, body: &'ast Expr<'ast>) -> BasicValueEnum<'ctx> {
         let fn_type = self
             .context
             .i64_type()
@@ -464,17 +620,18 @@ impl<'a, 'ctx, 'expr> ExprVisitor<'expr, BasicValueEnum<'ctx>> for LoweringConte
 
     fn visit_if(
         &mut self,
-        cond: &'expr Expr<'expr>,
-        then_e: &'expr Expr<'expr>,
-        else_e: &'expr Expr<'expr>,
+        cond: &'ast Expr<'ast>,
+        then_e: &'ast Expr<'ast>,
+        else_e: &'ast Expr<'ast>,
     ) -> BasicValueEnum<'ctx> {
         let cond_val = self.visit(cond).into_int_value();
+        let zero = cond_val.get_type().const_zero();
         let cmp = self
             .builder
             .build_int_compare(
                 inkwell::IntPredicate::NE,
                 cond_val,
-                self.context.bool_type().const_zero(),
+                zero,
                 "ifcond",
             )
             .unwrap();
@@ -500,7 +657,18 @@ impl<'a, 'ctx, 'expr> ExprVisitor<'expr, BasicValueEnum<'ctx>> for LoweringConte
         let then_bb_after = self.builder.get_insert_block().unwrap();
 
         self.builder.position_at_end(else_bb);
-        let else_val = self.visit(else_e);
+        let mut else_val = self.visit(else_e);
+        if then_val.is_int_value() && else_val.is_int_value() {
+            let tv = then_val.into_int_value();
+            let ev = else_val.into_int_value();
+            if tv.get_type().get_bit_width() != ev.get_type().get_bit_width() {
+                if ev.get_type().get_bit_width() < tv.get_type().get_bit_width() {
+                    else_val = self.builder.build_int_s_extend(ev, tv.get_type(), "sext").unwrap().into();
+                } else {
+                    else_val = self.builder.build_int_truncate(ev, tv.get_type(), "trunc").unwrap().into();
+                }
+            }
+        }
         self.builder.build_unconditional_branch(merge_bb).unwrap();
         let else_bb_after = self.builder.get_insert_block().unwrap();
 
@@ -516,8 +684,8 @@ impl<'a, 'ctx, 'expr> ExprVisitor<'expr, BasicValueEnum<'ctx>> for LoweringConte
 
     fn visit_field_access(
         &mut self,
-        _expr: &'expr Expr<'expr>,
-        _field: &'expr str,
+        _expr: &'ast Expr<'ast>,
+        _field: &'ast str,
     ) -> BasicValueEnum<'ctx> {
         // Struct GEP would go here when types are fully mapped.
         // For Phase 7 parity, we emit a 0 stub if untyped.
@@ -525,8 +693,8 @@ impl<'a, 'ctx, 'expr> ExprVisitor<'expr, BasicValueEnum<'ctx>> for LoweringConte
     }
     fn visit_variant(
         &mut self,
-        _tag: &'expr str,
-        payload: &'expr Expr<'expr>,
+        _tag: &'ast str,
+        payload: &'ast Expr<'ast>,
     ) -> BasicValueEnum<'ctx> {
         let size_val = self.context.i64_type().const_int(16, false);
         let align_val = self.context.i64_type().const_int(8, false);
@@ -585,8 +753,8 @@ impl<'a, 'ctx, 'expr> ExprVisitor<'expr, BasicValueEnum<'ctx>> for LoweringConte
 
     fn visit_case(
         &mut self,
-        expr: &'expr Expr<'expr>,
-        branches: &'expr [(Pattern<'expr>, &'expr Expr<'expr>)],
+        expr: &'ast Expr<'ast>,
+        branches: &'ast [(Pattern<'ast>, &'ast Expr<'ast>)],
     ) -> BasicValueEnum<'ctx> {
         let scrut_val = self.visit(expr);
         let function = self
@@ -639,24 +807,24 @@ impl<'a, 'ctx, 'expr> ExprVisitor<'expr, BasicValueEnum<'ctx>> for LoweringConte
 
     fn visit_array_index(
         &mut self,
-        _arr: &'expr Expr<'expr>,
-        _idx: &'expr Expr<'expr>,
+        _arr: &'ast Expr<'ast>,
+        _idx: &'ast Expr<'ast>,
     ) -> BasicValueEnum<'ctx> {
         self.context.i64_type().const_zero().into()
     }
     fn visit_annotate(
         &mut self,
-        expr: &'expr Expr<'expr>,
-        _ty: &'expr MonoType<'expr>,
+        expr: &'ast Expr<'ast>,
+        _ty: &'ast MonoType<'ast>,
     ) -> BasicValueEnum<'ctx> {
         self.visit(expr)
     }
 }
 
-impl<'a, 'ctx> LoweringContext<'a, 'ctx> {
-    fn compile_pattern_check<'expr>(
+impl<'a, 'ctx, 'ast> LoweringContext<'a, 'ctx, 'ast> {
+    fn compile_pattern_check(
         &mut self,
-        pat: &Pattern<'expr>,
+        pat: &Pattern<'ast>,
         val: BasicValueEnum<'ctx>,
         match_bb: inkwell::basic_block::BasicBlock<'ctx>,
         fail_bb: inkwell::basic_block::BasicBlock<'ctx>,
@@ -671,13 +839,49 @@ impl<'a, 'ctx> LoweringContext<'a, 'ctx> {
             }
             Pattern::Literal(Literal::Int(n)) => {
                 let const_val = self.context.i64_type().const_int(*n as u64, false);
+                let (val_int, const_val) = self.reconcile_int_types(val.into_int_value(), const_val);
                 let cmp = self
                     .builder
                     .build_int_compare(
                         inkwell::IntPredicate::EQ,
-                        val.into_int_value(),
+                        val_int,
                         const_val,
                         "patcmp",
+                    )
+                    .unwrap();
+                self.builder
+                    .build_conditional_branch(cmp, match_bb, fail_bb)
+                    .unwrap();
+            }
+            Pattern::Literal(Literal::Char(c)) => {
+                let const_val = self.context.i32_type().const_int(*c as u64, false);
+                let (val_int, const_val) = self.reconcile_int_types(val.into_int_value(), const_val);
+                let cmp = self
+                    .builder
+                    .build_int_compare(
+                        inkwell::IntPredicate::EQ,
+                        val_int,
+                        const_val,
+                        "patchar",
+                    )
+                    .unwrap();
+                self.builder
+                    .build_conditional_branch(cmp, match_bb, fail_bb)
+                    .unwrap();
+            }
+            Pattern::Literal(Literal::Bool(b)) => {
+                let const_val = self
+                    .context
+                    .bool_type()
+                    .const_int(if *b { 1 } else { 0 }, false);
+                let (val_int, const_val) = self.reconcile_int_types(val.into_int_value(), const_val);
+                let cmp = self
+                    .builder
+                    .build_int_compare(
+                        inkwell::IntPredicate::EQ,
+                        val_int,
+                        const_val,
+                        "patbool",
                     )
                     .unwrap();
                 self.builder

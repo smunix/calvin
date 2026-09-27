@@ -1,4 +1,5 @@
 use calvin_core::context::TypeContext;
+use calvin_core::lang::expr::{Expr, Pattern};
 use calvin_core::lang::typeclass::TypeClassRegistry;
 use calvin_core::lang::typeinf::TypeEnv;
 use calvin_core::lang::types::{MonoType, Prim};
@@ -28,11 +29,12 @@ fn init_builtin_env<'ctx>(ctx: &'ctx TypeContext, base_env: &mut TypeEnv<'ctx>) 
     base_env.insert("not", bool_to_bool);
 }
 
-pub fn init_bootstrap<'ctx>(
+pub fn init_bootstrap_with_defs<'ctx>(
     ctx: &'ctx TypeContext,
-) -> Result<(Rc<TypeEnv<'ctx>>, Rc<TypeClassRegistry<'ctx>>), String> {
+) -> Result<(Rc<TypeEnv<'ctx>>, Rc<TypeClassRegistry<'ctx>>, Rc<HashMap<String, &'ctx Expr<'ctx>>>), String> {
     let mut base_env = TypeEnv::new();
     let mut registry = TypeClassRegistry::new();
+    let mut fn_defs = HashMap::new();
 
     // 0. Initialize built-in macro/std functions matching Hobbes
     init_builtin_env(ctx, &mut base_env);
@@ -40,11 +42,18 @@ pub fn init_bootstrap<'ctx>(
     // 1. Process all boot scripts in alphabetical order
     for (_name, content) in BOOT_SCRIPTS {
         if let Ok(module) = parse_module(ctx, content) {
-            load_module_defs(ctx, &module.defs, &mut base_env, &mut registry);
+            load_module_defs(ctx, &module.defs, &mut base_env, &mut registry, &mut fn_defs);
         }
     }
 
-    Ok((Rc::new(base_env), Rc::new(registry)))
+    Ok((Rc::new(base_env), Rc::new(registry), Rc::new(fn_defs)))
+}
+
+pub fn init_bootstrap<'ctx>(
+    ctx: &'ctx TypeContext,
+) -> Result<(Rc<TypeEnv<'ctx>>, Rc<TypeClassRegistry<'ctx>>), String> {
+    let (env, reg, _) = init_bootstrap_with_defs(ctx)?;
+    Ok((env, reg))
 }
 
 fn load_module_defs<'ctx>(
@@ -52,6 +61,7 @@ fn load_module_defs<'ctx>(
     defs: &[ModuleDef<'ctx>],
     base_env: &mut TypeEnv<'ctx>,
     registry: &mut TypeClassRegistry<'ctx>,
+    fn_defs: &mut HashMap<String, &'ctx Expr<'ctx>>,
 ) {
     for def in defs {
         match def {
@@ -131,6 +141,23 @@ fn load_module_defs<'ctx>(
                     Vec::new(),
                     HashMap::new(),
                 );
+                for vd in &inst_def.members {
+                    let fn_expr = if vd.args.is_empty() {
+                        vd.body
+                    } else {
+                        vd.args.iter().rev().fold(vd.body, |acc, arg| {
+                            &*ctx.alloc(Expr::Fn(Pattern::Var(arg), acc))
+                        })
+                    };
+                    let mut op_name = vd.name;
+                    if op_name.starts_with('(') && op_name.ends_with(')') && op_name.len() >= 3 {
+                        op_name = &op_name[1..op_name.len() - 1];
+                    }
+                    fn_defs.insert(op_name.to_string(), fn_expr);
+                    if op_name != vd.name {
+                        fn_defs.insert(vd.name.to_string(), fn_expr);
+                    }
+                }
             }
             ModuleDef::VarType(vtd) => {
                 let (final_ty, var_name) = lower_var_type_def(ctx, vtd);
@@ -139,7 +166,23 @@ fn load_module_defs<'ctx>(
                     base_env.insert(vtd.name, final_ty);
                 }
             }
-            ModuleDef::VarDef(_) => {}
+            ModuleDef::VarDef(vd) => {
+                let fn_expr = if vd.args.is_empty() {
+                    vd.body
+                } else {
+                    vd.args.iter().rev().fold(vd.body, |acc, arg| {
+                        &*ctx.alloc(Expr::Fn(Pattern::Var(arg), acc))
+                    })
+                };
+                let mut op_name = vd.name;
+                if op_name.starts_with('(') && op_name.ends_with(')') && op_name.len() >= 3 {
+                    op_name = &op_name[1..op_name.len() - 1];
+                }
+                fn_defs.insert(op_name.to_string(), fn_expr);
+                if op_name != vd.name {
+                    fn_defs.insert(vd.name.to_string(), fn_expr);
+                }
+            }
         }
     }
 }
@@ -284,6 +327,10 @@ mod tests {
         let residuals = typeinf.residual_constraints();
         let result = calvin_core::lang::types::format_qual_type(ty, &residuals);
         assert_eq!(result, "(char) -> char");
+
+        let (_env, _registry, fn_defs) = init_bootstrap_with_defs(&ctx).expect("bootstrap failed");
+        assert!(fn_defs.contains_key("toLower"));
+        assert!(fn_defs.contains_key("toUpper"));
     }
 
     #[test]

@@ -81,32 +81,36 @@ fn format_unresolved_constraints_error<'a>(
 
 pub struct Compiler<'ctx> {
     ctx: &'ctx TypeContext,
-    cranelift_jit: Option<CraneliftJIT>,
-    llvm_jit: Option<LLVMCompiler<'static>>,
+    cranelift_jit: Option<CraneliftJIT<'ctx>>,
+    llvm_jit: Option<LLVMCompiler<'static, 'ctx>>,
     base_env: Rc<TypeEnv<'ctx>>,
     classes: Rc<TypeClassRegistry<'ctx>>,
+    #[allow(dead_code)]
+    fn_defs: Rc<std::collections::HashMap<String, &'ctx Expr<'ctx>>>,
 }
 
 impl<'ctx> Compiler<'ctx> {
     pub fn new(ctx: &'ctx TypeContext, backend: BackendChoice) -> Self {
-        let (base_env, classes) = calvin_boot::init_bootstrap(ctx)
+        let (base_env, classes, fn_defs) = calvin_boot::init_bootstrap_with_defs(ctx)
             .expect("Failed to initialize bootstrap environment from boot/*.hob");
         match backend {
             BackendChoice::Cranelift => Self {
                 ctx,
-                cranelift_jit: Some(CraneliftJIT::new()),
+                cranelift_jit: Some(CraneliftJIT::new().with_fn_defs(fn_defs.clone())),
                 llvm_jit: None,
                 base_env,
                 classes,
+                fn_defs,
             },
             BackendChoice::Llvm => {
                 let llvm_ctx: &'static Context = Box::leak(Box::new(Context::create()));
                 Self {
                     ctx,
                     cranelift_jit: None,
-                    llvm_jit: Some(LLVMCompiler::new(llvm_ctx)),
+                    llvm_jit: Some(LLVMCompiler::new(llvm_ctx).with_fn_defs(fn_defs.clone())),
                     base_env,
                     classes,
+                    fn_defs,
                 }
             }
         }
@@ -300,5 +304,30 @@ impl<'ctx> Compiler<'ctx> {
         } else {
             Err("Backend not initialized".to_string())
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_eval_to_upper_cranelift() {
+        let ctx = TypeContext::new();
+        let mut compiler = Compiler::new(&ctx, BackendChoice::Cranelift);
+        assert_eq!(compiler.eval_dynamic("toUpper 'a'").unwrap(), "'A'");
+        assert_eq!(compiler.eval_dynamic("toUpper('a')").unwrap(), "'A'");
+        assert_eq!(compiler.eval_dynamic("toLower 'Z'").unwrap(), "'z'");
+        assert_eq!(compiler.eval_dynamic("toLower('Z')").unwrap(), "'z'");
+    }
+
+    #[test]
+    fn test_eval_to_upper_llvm() {
+        let ctx = TypeContext::new();
+        let mut compiler = Compiler::new(&ctx, BackendChoice::Llvm);
+        assert_eq!(compiler.eval_dynamic("toUpper 'a'").unwrap(), "'A'");
+        assert_eq!(compiler.eval_dynamic("toUpper('a')").unwrap(), "'A'");
+        assert_eq!(compiler.eval_dynamic("toLower 'Z'").unwrap(), "'z'");
+        assert_eq!(compiler.eval_dynamic("toLower('Z')").unwrap(), "'z'");
     }
 }
