@@ -13,6 +13,7 @@ pub enum LexicalError {
 #[logos(skip r"[ \t\r\n\f]+")] // Skip spaces, tabs, newlines, form feeds.
 #[logos(skip r"//[^\n]*")] // Skip line comments
 #[logos(skip r"/\*([^*]|\*[^/])*\*/")] // Skip block comments
+#[logos(skip r"\{-#([^-]|-+[^#-])*-+#\}")] // Skip pragmas like {-# UNSAFE ... #-}
 pub enum Token<'a> {
     // Keywords
     #[token("let")]
@@ -47,6 +48,10 @@ pub enum Token<'a> {
     Type,
     #[token("data")]
     Data,
+    #[token("do")]
+    Do,
+    #[token("return")]
+    Return,
 
     // Symbols
     #[token("=")]
@@ -99,6 +104,30 @@ pub enum Token<'a> {
     DoubleEq,
     #[token("!=")]
     NotEq,
+    #[token("<=", priority = 10)]
+    Lte,
+    #[token(">=", priority = 10)]
+    Gte,
+    #[token("<")]
+    Lt,
+    #[token(">")]
+    Gt,
+    #[token("===", priority = 15)]
+    TripleEq,
+    #[token("!==", priority = 15)]
+    ExclDoubleEq,
+    #[token("~")]
+    Tilde,
+    #[token("++", priority = 10)]
+    PlusPlus,
+    #[token("<-", priority = 10)]
+    LeftArrow,
+    #[token("and")]
+    And,
+    #[token("or")]
+    Or,
+    #[token("not")]
+    Not,
 
     // Identifiers and Literals
     #[regex(r"[a-zA-Z_][a-zA-Z0-9_]*")]
@@ -149,7 +178,21 @@ pub enum Token<'a> {
     #[regex(r"'([^'\\]|\\.)*'", |lex| {
         let s = lex.slice();
         if s.len() >= 3 {
-            s.chars().nth(1).unwrap_or('\0')
+            let inner = &s[1..s.len()-1];
+            if inner.starts_with('\\') {
+                match inner.chars().nth(1) {
+                    Some('n') => '\n',
+                    Some('t') => '\t',
+                    Some('r') => '\r',
+                    Some('\\') => '\\',
+                    Some('\'') => '\'',
+                    Some('0') => '\0',
+                    Some(c) => c,
+                    None => '\0',
+                }
+            } else {
+                inner.chars().next().unwrap_or('\0')
+            }
         } else {
             '\0'
         }

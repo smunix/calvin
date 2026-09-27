@@ -62,4 +62,5 @@ pub enum TypeExpr<'a> {
     Prim(Prim),
     Tuple(Vec<TypeExpr<'a>>),
     Fn(Box<TypeExpr<'a>>, Box<TypeExpr<'a>>),
+    Array(Box<TypeExpr<'a>>),
 }

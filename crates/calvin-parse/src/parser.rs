@@ -162,7 +162,42 @@ where
             tuple_or_paren,
         ));
 
-        let atom_annotated = atom
+        enum Postfix<'a, 'ctx> {
+            Field(&'a str),
+            Index(&'ctx Expr<'ctx>),
+            Slice(&'ctx Expr<'ctx>, Option<&'ctx Expr<'ctx>>),
+        }
+
+        let slice_parser = just(Token::LBracket)
+            .ignore_then(expr.clone())
+            .then(just(Token::Colon).ignore_then(expr.clone().or_not()).or_not())
+            .then_ignore(just(Token::RBracket))
+            .map(|(start, slice_opt)| match slice_opt {
+                Some(end_opt) => Postfix::Slice(start, end_opt),
+                None => Postfix::Index(start),
+            });
+
+        let field_parser = just(Token::Dot)
+            .ignore_then(select! { Token::Ident(name) => name })
+            .map(Postfix::Field);
+
+        let atom_postfix = atom.foldl(
+            choice((field_parser, slice_parser)).repeated(),
+            move |base, post| match post {
+                Postfix::Field(f) => &*ctx.alloc(Expr::FieldAccess(base, f)),
+                Postfix::Index(idx) => &*ctx.alloc(Expr::ArrayIndex(base, idx)),
+                Postfix::Slice(start, end_opt) => {
+                    let slice_var = &*ctx.alloc(Expr::Var("slice"));
+                    if let Some(end) = end_opt {
+                        &*ctx.alloc(Expr::App(slice_var, ctx.alloc_slice_clone(&[base, start, end])))
+                    } else {
+                        &*ctx.alloc(Expr::App(slice_var, ctx.alloc_slice_clone(&[base, start])))
+                    }
+                }
+            },
+        );
+
+        let atom_annotated = atom_postfix
             .then(just(Token::DoubleColon).ignore_then(type_expr_parser()).or_not())
             .map(move |(e, ty_opt)| match ty_opt {
                 Some(te) => &*ctx.alloc(Expr::Annotate(e, lower_type_expr(ctx, &te))),
@@ -183,19 +218,13 @@ where
 
         let op_mul = app.clone().foldl(
             choice((
-                just(Token::Star).to(Token::Star),
-                just(Token::Slash).to(Token::Slash),
-                just(Token::Percent).to(Token::Percent),
+                just(Token::Star).to("*"),
+                just(Token::Slash).to("/"),
+                just(Token::Percent).to("%"),
             ))
             .then(app.clone())
             .repeated(),
-            move |lhs, (op, rhs)| {
-                let op_name = match op {
-                    Token::Star => "*",
-                    Token::Slash => "/",
-                    Token::Percent => "%",
-                    _ => unreachable!(),
-                };
+            move |lhs, (op_name, rhs)| {
                 &*ctx.alloc(Expr::App(
                     &*ctx.alloc(Expr::Var(op_name)),
                     ctx.alloc_slice_clone(&[lhs, rhs]),
@@ -205,17 +234,61 @@ where
 
         let op_add = op_mul.clone().foldl(
             choice((
-                just(Token::Plus).to(Token::Plus),
-                just(Token::Minus).to(Token::Minus),
+                just(Token::Plus).to("+"),
+                just(Token::Minus).to("-"),
+                just(Token::PlusPlus).to("++"),
             ))
             .then(op_mul.clone())
             .repeated(),
-            move |lhs, (op, rhs)| {
-                let op_name = match op {
-                    Token::Plus => "+",
-                    Token::Minus => "-",
-                    _ => unreachable!(),
-                };
+            move |lhs, (op_name, rhs)| {
+                &*ctx.alloc(Expr::App(
+                    &*ctx.alloc(Expr::Var(op_name)),
+                    ctx.alloc_slice_clone(&[lhs, rhs]),
+                ))
+            },
+        );
+
+        let op_rel = op_add.clone().foldl(
+            choice((
+                just(Token::Lte).to("<="),
+                just(Token::Gte).to(">="),
+                just(Token::Lt).to("<"),
+                just(Token::Gt).to(">"),
+                just(Token::DoubleEq).to("=="),
+                just(Token::NotEq).to("!="),
+                just(Token::TripleEq).to("==="),
+                just(Token::ExclDoubleEq).to("!=="),
+                just(Token::Tilde).to("~"),
+            ))
+            .then(op_add.clone())
+            .repeated(),
+            move |lhs, (op_name, rhs)| {
+                &*ctx.alloc(Expr::App(
+                    &*ctx.alloc(Expr::Var(op_name)),
+                    ctx.alloc_slice_clone(&[lhs, rhs]),
+                ))
+            },
+        );
+
+        let op_and = op_rel.clone().foldl(
+            just(Token::And)
+                .to("and")
+                .then(op_rel.clone())
+                .repeated(),
+            move |lhs, (op_name, rhs)| {
+                &*ctx.alloc(Expr::App(
+                    &*ctx.alloc(Expr::Var(op_name)),
+                    ctx.alloc_slice_clone(&[lhs, rhs]),
+                ))
+            },
+        );
+
+        let op_or = op_and.clone().foldl(
+            just(Token::Or)
+                .to("or")
+                .then(op_and.clone())
+                .repeated(),
+            move |lhs, (op_name, rhs)| {
                 &*ctx.alloc(Expr::App(
                     &*ctx.alloc(Expr::Var(op_name)),
                     ctx.alloc_slice_clone(&[lhs, rhs]),
@@ -266,7 +339,17 @@ where
                 &*ctx.alloc(Expr::Case(scrutinee, ctx.alloc_slice_clone(&branches)))
             });
 
-        choice((let_bind, lambda, match_expr, op_add))
+        let if_expr = just(Token::If)
+            .ignore_then(expr.clone())
+            .then_ignore(just(Token::Then))
+            .then(expr.clone())
+            .then_ignore(just(Token::Else))
+            .then(expr.clone())
+            .map(move |((cond, then_e), else_e)| {
+                &*ctx.alloc(Expr::If(cond, then_e, else_e))
+            });
+
+        choice((if_expr, let_bind, lambda, match_expr, op_or))
             .then(just(Token::DoubleColon).ignore_then(type_expr_parser()).or_not())
             .map(move |(e, ty_opt)| match ty_opt {
                 Some(te) => &*ctx.alloc(Expr::Annotate(e, lower_type_expr(ctx, &te))),
@@ -296,6 +379,10 @@ fn lower_type_expr<'a, 'ctx>(
             let d = lower_type_expr(ctx, dom);
             let c = lower_type_expr(ctx, codom);
             ctx.alloc(calvin_core::lang::types::MonoType::Fn(d, c))
+        }
+        TypeExpr::Array(inner) => {
+            let elem = lower_type_expr(ctx, inner);
+            ctx.alloc(calvin_core::lang::types::MonoType::Array(elem))
         }
     }
 }
@@ -338,7 +425,12 @@ where
                 }
             });
 
-        let atom = choice((prim, var, tuple_or_paren));
+        let array = just(Token::LBracket)
+            .ignore_then(ty.clone())
+            .then_ignore(just(Token::RBracket))
+            .map(|t| TypeExpr::Array(Box::new(t)));
+
+        let atom = choice((prim, var, tuple_or_paren, array));
 
         atom.clone()
             .then(just(Token::Arrow).ignore_then(ty.clone()).or_not())
@@ -367,6 +459,18 @@ where
         just(Token::Percent).to("%"),
         just(Token::DoubleEq).to("=="),
         just(Token::NotEq).to("!="),
+        just(Token::Lte).to("<="),
+        just(Token::Gte).to(">="),
+        just(Token::Lt).to("<"),
+        just(Token::Gt).to(">"),
+        just(Token::TripleEq).to("==="),
+        just(Token::ExclDoubleEq).to("!=="),
+        just(Token::Tilde).to("~"),
+        just(Token::PlusPlus).to("++"),
+        just(Token::LeftArrow).to("<-"),
+        just(Token::And).to("and"),
+        just(Token::Or).to("or"),
+        just(Token::In).to("in"),
     ));
 
     let paren_op = op_sym.clone().delimited_by(just(Token::LParen), just(Token::RParen));
@@ -479,12 +583,19 @@ where
             })
         });
 
-    let module_def = choice((class_def, instance_def));
+    let top_var_type = cmember.map(ModuleDef::VarType);
+    let top_var_def = choice((op_member, fn_member)).map(ModuleDef::VarDef);
 
-    module_def.repeated().collect::<Vec<_>>().map(|defs| Module {
-        name: None,
-        defs,
-    })
+    let module_def = choice((class_def, instance_def, top_var_type, top_var_def));
+
+    let module_header = just(Token::Module)
+        .ignore_then(select! { Token::Ident(name) => name })
+        .then_ignore(just(Token::Where));
+
+    module_header
+        .or_not()
+        .then(module_def.repeated().collect::<Vec<_>>())
+        .map(|(name, defs)| Module { name, defs })
 }
 
 pub fn parse_expr<'ctx>(ctx: &'ctx TypeContext, src: &'ctx str) -> Result<&'ctx Expr<'ctx>, String> {
@@ -532,3 +643,28 @@ pub fn parse_module<'ctx>(ctx: &'ctx TypeContext, src: &'ctx str) -> Result<Modu
         Err(errs) => Err(format!("Parse error: {:?}", errs)),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_to_lower() {
+        let ctx = TypeContext::new();
+        let src = r#"
+toLower :: char -> char
+toLower c = if (c >= 'A' and c <= 'Z') then ((c - 'A') + 'a') else c
+"#;
+        let module = parse_module(&ctx, src).expect("failed to parse toLower module");
+        assert_eq!(module.defs.len(), 2);
+    }
+
+    #[test]
+    fn test_parse_strings_hob() {
+        let ctx = TypeContext::new();
+        let src = include_str!("../../calvin-boot/boot/strings.hob");
+        let module = parse_module(&ctx, src).expect("failed to parse strings.hob");
+        assert!(!module.defs.is_empty());
+    }
+}
+
