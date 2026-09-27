@@ -346,4 +346,21 @@ mod tests {
             "ArrayIndex a => (a) -> long"
         );
     }
+
+    #[test]
+    fn test_type_of_convert() {
+        let ctx = TypeContext::new();
+        let mut compiler_llvm = Compiler::new(&ctx, BackendChoice::Llvm);
+        assert_eq!(
+            compiler_llvm.type_of("convert").unwrap(),
+            "Convert a b => (a) -> b"
+        );
+
+        let mut compiler_cl = Compiler::new(&ctx, BackendChoice::Cranelift);
+        assert_eq!(
+            compiler_cl.type_of("convert").unwrap(),
+            "Convert a b => (a) -> b"
+        );
+    }
 }
+

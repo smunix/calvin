@@ -18,7 +18,11 @@ pub fn boot_script(name: &str) -> Option<&'static str> {
         .map(|(_, content)| *content)
 }
 
-fn init_builtin_env<'ctx>(ctx: &'ctx TypeContext, base_env: &mut TypeEnv<'ctx>) {
+fn init_builtin_env<'ctx>(
+    ctx: &'ctx TypeContext,
+    base_env: &mut TypeEnv<'ctx>,
+    registry: &mut TypeClassRegistry<'ctx>,
+) {
     let bool_ty: &'ctx MonoType<'ctx> = &*ctx.alloc(MonoType::Prim(Prim::Bool));
     let tup = ctx.alloc(MonoType::Tuple(ctx.arena().alloc_slice_clone(&[bool_ty, bool_ty])));
     let tup_to_bool = ctx.alloc(MonoType::Fn(tup, bool_ty));
@@ -30,16 +34,40 @@ fn init_builtin_env<'ctx>(ctx: &'ctx TypeContext, base_env: &mut TypeEnv<'ctx>) 
 
     // Identity and conversion primitives matching Hobbes
     let tgen0: &'ctx MonoType<'ctx> = &*ctx.alloc(MonoType::TGen(0));
+    let tgen1: &'ctx MonoType<'ctx> = &*ctx.alloc(MonoType::TGen(1));
     base_env.insert("id", ctx.alloc(MonoType::Fn(tgen0, tgen0)));
 
     let int_ty: &'ctx MonoType<'ctx> = &*ctx.alloc(MonoType::Prim(Prim::Int));
     let long_ty: &'ctx MonoType<'ctx> = &*ctx.alloc(MonoType::Prim(Prim::Long));
     let short_ty: &'ctx MonoType<'ctx> = &*ctx.alloc(MonoType::Prim(Prim::Short));
     let byte_ty: &'ctx MonoType<'ctx> = &*ctx.alloc(MonoType::Prim(Prim::Byte));
+    let float_ty: &'ctx MonoType<'ctx> = &*ctx.alloc(MonoType::Prim(Prim::Float));
+    let double_ty: &'ctx MonoType<'ctx> = &*ctx.alloc(MonoType::Prim(Prim::Double));
+    let int128_ty: &'ctx MonoType<'ctx> = &*ctx.alloc(MonoType::Prim(Prim::Int128));
 
-    base_env.insert("i2l", ctx.alloc(MonoType::Fn(int_ty, long_ty)));
-    base_env.insert("s2i", ctx.alloc(MonoType::Fn(short_ty, int_ty)));
+    base_env.insert("b2i", ctx.alloc(MonoType::Fn(byte_ty, int_ty)));
     base_env.insert("b2l", ctx.alloc(MonoType::Fn(byte_ty, long_ty)));
+    base_env.insert("s2i", ctx.alloc(MonoType::Fn(short_ty, int_ty)));
+    base_env.insert("i2l", ctx.alloc(MonoType::Fn(int_ty, long_ty)));
+    base_env.insert("i2d", ctx.alloc(MonoType::Fn(int_ty, double_ty)));
+    base_env.insert("i2f", ctx.alloc(MonoType::Fn(int_ty, float_ty)));
+    base_env.insert("l2d", ctx.alloc(MonoType::Fn(long_ty, double_ty)));
+    base_env.insert("l2f", ctx.alloc(MonoType::Fn(long_ty, float_ty)));
+    base_env.insert("f2d", ctx.alloc(MonoType::Fn(float_ty, double_ty)));
+    base_env.insert("l2i16", ctx.alloc(MonoType::Fn(long_ty, int128_ty)));
+
+    // Hobbes builtin primitive type class: Convert a b => (a) -> b
+    registry.register_class(
+        "Convert",
+        vec!["a", "b"],
+        Vec::new(),
+        HashMap::new(),
+    );
+
+    let gen_slice = ctx.arena().alloc_slice_clone(&[tgen0, tgen1]);
+    let a_to_b = ctx.alloc(MonoType::Fn(tgen0, tgen1));
+    let convert_cst_ty = ctx.alloc(MonoType::Constraint("Convert", gen_slice, a_to_b));
+    base_env.insert("convert", convert_cst_ty);
 }
 
 pub fn init_bootstrap_with_defs<'ctx>(
@@ -50,13 +78,21 @@ pub fn init_bootstrap_with_defs<'ctx>(
     let mut fn_defs = HashMap::new();
 
     // 0. Initialize built-in macro/std functions matching Hobbes
-    init_builtin_env(ctx, &mut base_env);
+    init_builtin_env(ctx, &mut base_env, &mut registry);
 
     let id_fn = &*ctx.alloc(Expr::Fn(Pattern::Var("x"), ctx.alloc(Expr::Var("x"))));
     fn_defs.insert("id".to_string(), id_fn);
-    fn_defs.insert("i2l".to_string(), id_fn);
-    fn_defs.insert("s2i".to_string(), id_fn);
+    fn_defs.insert("convert".to_string(), id_fn);
+    fn_defs.insert("b2i".to_string(), id_fn);
     fn_defs.insert("b2l".to_string(), id_fn);
+    fn_defs.insert("s2i".to_string(), id_fn);
+    fn_defs.insert("i2l".to_string(), id_fn);
+    fn_defs.insert("i2d".to_string(), id_fn);
+    fn_defs.insert("i2f".to_string(), id_fn);
+    fn_defs.insert("l2d".to_string(), id_fn);
+    fn_defs.insert("l2f".to_string(), id_fn);
+    fn_defs.insert("f2d".to_string(), id_fn);
+    fn_defs.insert("l2i16".to_string(), id_fn);
 
     // 1. Process all boot scripts in alphabetical order
     for (_name, content) in BOOT_SCRIPTS {
@@ -124,10 +160,10 @@ fn load_module_defs<'ctx>(
                         op_name = &op_name[1..op_name.len() - 1];
                     }
 
-                    let inner_fn = if class_def.params.len() == 3 {
+                    let inner_fn = if class_def.params.len() == 3 && matches!(class_def.name, "Add" | "Subtract" | "Multiply" | "Divide" | "Mod") {
                         let b_to_c = ctx.alloc(MonoType::Fn(gen_tys[1], gen_tys[2]));
                         ctx.alloc(MonoType::Fn(gen_tys[0], b_to_c))
-                    } else if class_def.params.len() == 2 {
+                    } else if class_def.params.len() == 2 && matches!(class_def.name, "Eq" | "Compare" | "LessThan") {
                         let b_to_bool = ctx.alloc(MonoType::Fn(gen_tys[1], ctx.alloc(MonoType::Prim(Prim::Bool))));
                         ctx.alloc(MonoType::Fn(gen_tys[0], b_to_bool))
                     } else {
@@ -430,5 +466,27 @@ mod tests {
         let residuals2 = typeinf2.residual_constraints();
         let formatted2 = calvin_core::lang::types::format_qual_type(ty2, &residuals2);
         assert_eq!(formatted2, "long");
+    }
+
+    #[test]
+    fn test_bootstrap_convert() {
+        let ctx = TypeContext::new();
+        let (env, registry) = init_bootstrap(&ctx).expect("bootstrap failed");
+
+        assert!(registry.classes.contains_key("Convert"));
+        let instances = registry.instances.get("Convert").expect("Convert instances missing");
+        assert!(!instances.is_empty());
+
+        let mut typeinf = calvin_core::lang::typeinf::TypeInference::with_env_and_classes(
+            &ctx,
+            env.clone(),
+            registry.clone(),
+        );
+        let ast = calvin_parse::parse_expr(&ctx, "convert").expect("parse failed");
+        let ty = typeinf.visit(ast).expect("infer failed");
+        typeinf.solve_constraints().expect("solve failed");
+        let residuals = typeinf.residual_constraints();
+        let formatted = calvin_core::lang::types::format_qual_type(ty, &residuals);
+        assert_eq!(formatted, "Convert a b => (a) -> b");
     }
 }
