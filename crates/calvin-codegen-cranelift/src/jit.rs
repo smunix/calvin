@@ -309,9 +309,15 @@ impl<'a, 'm, 'expr> ExprVisitor<'expr, ir::Value> for LoweringContext<'a, 'm> {
 
         for (i, val) in vals.iter().enumerate() {
             let offset = (i as i32) * (elem_size as i32);
+            let val_ty = self.builder.func.dfg.value_type(*val);
+            let val_to_store = if val_ty.is_int() && val_ty.bits() < 64 {
+                self.builder.ins().uextend(ir::types::I64, *val)
+            } else {
+                *val
+            };
             self.builder
                 .ins()
-                .store(cranelift_codegen::ir::MemFlags::new(), *val, ptr, offset);
+                .store(cranelift_codegen::ir::MemFlags::new(), val_to_store, ptr, offset);
         }
 
         ptr
@@ -341,9 +347,15 @@ impl<'a, 'm, 'expr> ExprVisitor<'expr, ir::Value> for LoweringContext<'a, 'm> {
 
         for (i, val) in vals.iter().enumerate() {
             let offset = (i as i32) * (elem_size as i32);
+            let val_ty = self.builder.func.dfg.value_type(*val);
+            let val_to_store = if val_ty.is_int() && val_ty.bits() < 64 {
+                self.builder.ins().uextend(ir::types::I64, *val)
+            } else {
+                *val
+            };
             self.builder
                 .ins()
-                .store(cranelift_codegen::ir::MemFlags::new(), *val, ptr, offset);
+                .store(cranelift_codegen::ir::MemFlags::new(), val_to_store, ptr, offset);
         }
 
         ptr
@@ -393,8 +405,36 @@ impl<'a, 'm, 'expr> ExprVisitor<'expr, ir::Value> for LoweringContext<'a, 'm> {
     fn visit_field_access(&mut self, _expr: &'expr Expr<'expr>, _field: &'expr str) -> ir::Value {
         self.builder.ins().iconst(ir::types::I64, 0)
     }
-    fn visit_variant(&mut self, _tag: &'expr str, _payload: &'expr Expr<'expr>) -> ir::Value {
-        self.builder.ins().iconst(ir::types::I64, 0)
+
+    fn visit_variant(&mut self, _tag: &'expr str, payload: &'expr Expr<'expr>) -> ir::Value {
+        let size_val = self.builder.ins().iconst(ir::types::I64, 16);
+        let align_val = self.builder.ins().iconst(ir::types::I64, 8);
+
+        let local_alloc = self
+            .module
+            .declare_func_in_func(self.alloc_func, self.builder.func);
+        let call = self.builder.ins().call(local_alloc, &[size_val, align_val]);
+        let ptr = self.builder.inst_results(call)[0];
+
+        // Store tag at offset 0
+        let tag_val = self.builder.ins().iconst(ir::types::I64, 0);
+        self.builder
+            .ins()
+            .store(cranelift_codegen::ir::MemFlags::new(), tag_val, ptr, 0);
+
+        // Store payload at offset 8
+        let payload_val = self.visit(payload);
+        let val_ty = self.builder.func.dfg.value_type(payload_val);
+        let payload_to_store = if val_ty.is_int() && val_ty.bits() < 64 {
+            self.builder.ins().uextend(ir::types::I64, payload_val)
+        } else {
+            payload_val
+        };
+        self.builder
+            .ins()
+            .store(cranelift_codegen::ir::MemFlags::new(), payload_to_store, ptr, 8);
+
+        ptr
     }
 
     fn visit_case(
@@ -556,6 +596,16 @@ impl<'a, 'm> LoweringContext<'a, 'm> {
 
                     self.compile_pattern_check(p, elem_val, succ_block, fail_block);
                 }
+            }
+            Pattern::Variant(_tag, p) => {
+                let offset = 8;
+                let elem_val = self.builder.ins().load(
+                    ir::types::I64,
+                    cranelift_codegen::ir::MemFlags::new(),
+                    val,
+                    offset,
+                );
+                self.compile_pattern_check(p, elem_val, match_block, fail_block);
             }
             _ => unimplemented!("pattern check for {:?}", pat),
         }

@@ -202,17 +202,12 @@ impl<'ctx> Compiler<'ctx> {
                 MonoType::Prim(Prim::Double | Prim::Float) => {
                     let func_ptr = jit.compile_expr::<f64>(expr, ty);
                     let res = func_ptr();
-                    Ok(res.to_string())
-                }
-                MonoType::Prim(Prim::Bool) => {
-                    let func_ptr = jit.compile_expr::<i64>(expr, ty);
-                    let res = func_ptr();
-                    Ok(if res != 0 { "true" } else { "false" }.to_string())
+                    Ok(unsafe { calvin_core::runtime::value::format_runtime_value(res.to_bits(), ty) })
                 }
                 _ => {
                     let func_ptr = jit.compile_expr::<i64>(expr, ty);
                     let res = func_ptr();
-                    Ok(res.to_string())
+                    Ok(unsafe { calvin_core::runtime::value::format_runtime_value(res as u64, ty) })
                 }
             }
         } else if let Some(ref jit) = self.llvm_jit {
@@ -220,17 +215,12 @@ impl<'ctx> Compiler<'ctx> {
                 MonoType::Prim(Prim::Double | Prim::Float) => {
                     let jit_fn = jit.compile_expr::<f64>(expr, ty);
                     let res = unsafe { jit_fn.call() };
-                    Ok(res.to_string())
-                }
-                MonoType::Prim(Prim::Bool) => {
-                    let jit_fn = jit.compile_expr::<i64>(expr, ty);
-                    let res = unsafe { jit_fn.call() };
-                    Ok(if res != 0 { "true" } else { "false" }.to_string())
+                    Ok(unsafe { calvin_core::runtime::value::format_runtime_value(res.to_bits(), ty) })
                 }
                 _ => {
                     let jit_fn = jit.compile_expr::<i64>(expr, ty);
                     let res = unsafe { jit_fn.call() };
-                    Ok(res.to_string())
+                    Ok(unsafe { calvin_core::runtime::value::format_runtime_value(res as u64, ty) })
                 }
             }
         } else {

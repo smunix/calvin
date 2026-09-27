@@ -50,7 +50,7 @@ where
             });
 
         let record_field = select! { Token::Ident(name) => name }
-            .then_ignore(just(Token::Colon))
+            .then_ignore(just(Token::Colon).or(just(Token::Eq)))
             .then(pat.clone());
 
         let record = record_field
@@ -60,12 +60,20 @@ where
             .delimited_by(just(Token::LBrace), just(Token::RBrace))
             .map(move |fields| Pattern::Record(ctx.alloc_slice_clone(&fields)));
 
-        let variant = just(Token::Pipe)
-            .ignore_then(select! { Token::Ident(name) => name })
-            .then_ignore(just(Token::Eq))
+        let variant_payload = select! { Token::Ident(name) => name }
+            .then_ignore(just(Token::Colon).or(just(Token::Eq)))
             .then(pat.clone())
-            .then_ignore(just(Token::Pipe))
             .map(move |(tag, payload)| Pattern::Variant(tag, &*ctx.alloc(payload)));
+
+        let variant_unit = select! { Token::Ident(name) => name }
+            .map(move |tag| {
+                let unit = Pattern::Literal(Literal::Unit);
+                Pattern::Variant(tag, &*ctx.alloc(unit))
+            });
+
+        let variant = just(Token::Pipe)
+            .ignore_then(choice((variant_payload, variant_unit)))
+            .then_ignore(just(Token::Pipe));
 
         choice((literal, wildcard, var, tuple_or_paren, record, variant))
     })
@@ -120,7 +128,7 @@ where
             .map(move |exprs| &*ctx.alloc(Expr::Array(ctx.alloc_slice_clone(&exprs))));
 
         let record_field = select! { Token::Ident(name) => name }
-            .then_ignore(just(Token::Colon))
+            .then_ignore(just(Token::Colon).or(just(Token::Eq)))
             .then(expr.clone());
 
         let record = record_field
@@ -130,12 +138,20 @@ where
             .delimited_by(just(Token::LBrace), just(Token::RBrace))
             .map(move |fields| &*ctx.alloc(Expr::Record(ctx.alloc_slice_clone(&fields))));
 
-        let variant = just(Token::Pipe)
-            .ignore_then(select! { Token::Ident(name) => name })
-            .then_ignore(just(Token::Eq))
+        let variant_payload = select! { Token::Ident(name) => name }
+            .then_ignore(just(Token::Colon).or(just(Token::Eq)))
             .then(expr.clone())
-            .then_ignore(just(Token::Pipe))
             .map(move |(tag, payload)| &*ctx.alloc(Expr::Variant(tag, payload)));
+
+        let variant_unit = select! { Token::Ident(name) => name }
+            .map(move |tag| {
+                let unit = &*ctx.alloc(Expr::Literal(Literal::Unit));
+                &*ctx.alloc(Expr::Variant(tag, unit))
+            });
+
+        let variant = just(Token::Pipe)
+            .ignore_then(choice((variant_payload, variant_unit)))
+            .then_ignore(just(Token::Pipe));
 
         let atom = choice((
             atom_literal,

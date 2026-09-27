@@ -125,3 +125,36 @@ fn test_hobbes_curried_and_tuple_application() {
     assert_eq!(format_qual_type(ty, &residuals), "double");
 }
 
+#[test]
+fn test_hobbes_record_and_variant_parsing_and_typing() {
+    let ctx = TypeContext::new();
+
+    // 1. Calvin record: {x: 1, y: 2}
+    let mut typeinf = setup_typeinf(&ctx);
+    let ast1 = parse_expr(&ctx, "{x: 1, y: 2}").expect("parse failed");
+    let ty1 = typeinf.visit(ast1).expect("infer failed");
+    let residuals1 = typeinf.residual_constraints();
+    assert_eq!(format_qual_type(ty1, &residuals1), "{x:int, y:int}");
+
+    // 2. Hobbes record: {x=1, y=2}
+    let mut typeinf = setup_typeinf(&ctx);
+    let ast2 = parse_expr(&ctx, "{x=1, y=2}").expect("parse failed");
+    let ty2 = typeinf.visit(ast2).expect("infer failed");
+    let residuals2 = typeinf.residual_constraints();
+    assert_eq!(format_qual_type(ty2, &residuals2), "{x:int, y:int}");
+
+    // 3. Variant: |x=1|
+    let mut typeinf = setup_typeinf(&ctx);
+    let ast3 = parse_expr(&ctx, "|x=1|").expect("parse failed");
+    let ty3 = typeinf.visit(ast3).expect("infer failed");
+    let residuals3 = typeinf.residual_constraints();
+    assert_eq!(format_qual_type(ty3, &residuals3), "|x:int|");
+
+    // 4. Unit variant: |x|
+    let mut typeinf = setup_typeinf(&ctx);
+    let ast4 = parse_expr(&ctx, "|x|").expect("parse failed");
+    let ty4 = typeinf.visit(ast4).expect("infer failed");
+    let residuals4 = typeinf.residual_constraints();
+    assert_eq!(format_qual_type(ty4, &residuals4), "|x:()|");
+}
+

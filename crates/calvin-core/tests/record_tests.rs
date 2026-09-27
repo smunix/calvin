@@ -105,3 +105,39 @@ fn test_variant_unqualifiers() {
         .expect("Should satisfy");
     assert!(matches!(dict1, Expr::Var("dict_HasCtor")));
 }
+
+#[test]
+fn test_record_and_variant_formatting() {
+    use calvin_core::runtime::value::format_runtime_value;
+
+    let ctx = TypeContext::new();
+    let int_ty = ctx.alloc(MonoType::Prim(Prim::Int));
+    let fields = ctx
+        .arena()
+        .alloc_slice_copy(&[("x", int_ty as &MonoType), ("y", int_ty as &MonoType)]);
+    let rec_ty = ctx.alloc(MonoType::Record(fields, None));
+
+    // 2 64-bit integer fields: x=1, y=2
+    let data: [u64; 2] = [1, 2];
+    let formatted = unsafe { format_runtime_value(data.as_ptr() as u64, rec_ty) };
+    assert_eq!(formatted, "{x=1, y=2}");
+
+    // Variant: tag 0, payload 42
+    let cases = ctx
+        .arena()
+        .alloc_slice_copy(&[("x", int_ty as &MonoType)]);
+    let var_ty = ctx.alloc(MonoType::Variant(cases, None));
+    let var_data: [u64; 2] = [0, 42];
+    let formatted_var = unsafe { format_runtime_value(var_data.as_ptr() as u64, var_ty) };
+    assert_eq!(formatted_var, "|x=42|");
+
+    // Unit variant: tag 0, unit payload
+    let unit_ty = ctx.alloc(MonoType::Prim(Prim::Unit));
+    let unit_cases = ctx
+        .arena()
+        .alloc_slice_copy(&[("Foo", unit_ty as &MonoType)]);
+    let unit_var_ty = ctx.alloc(MonoType::Variant(unit_cases, None));
+    let unit_var_data: [u64; 2] = [0, 0];
+    let formatted_unit = unsafe { format_runtime_value(unit_var_data.as_ptr() as u64, unit_var_ty) };
+    assert_eq!(formatted_unit, "|Foo|");
+}

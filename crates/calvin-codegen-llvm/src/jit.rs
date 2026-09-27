@@ -339,12 +339,25 @@ impl<'a, 'ctx, 'expr> ExprVisitor<'expr, BasicValueEnum<'ctx>> for LoweringConte
 
         for (i, val) in vals.iter().enumerate() {
             let offset_val = self.context.i64_type().const_int(i as u64, false);
+            let val_to_store = if val.is_int_value() {
+                let int_val = val.into_int_value();
+                if int_val.get_type().get_bit_width() < 64 {
+                    self.builder
+                        .build_int_z_extend(int_val, self.context.i64_type(), "zext")
+                        .unwrap()
+                        .into()
+                } else {
+                    *val
+                }
+            } else {
+                *val
+            };
             let gep = unsafe {
                 self.builder
                     .build_in_bounds_gep(self.context.i64_type(), ptr, &[offset_val], "gep")
                     .unwrap()
             };
-            self.builder.build_store(gep, *val).unwrap();
+            self.builder.build_store(gep, val_to_store).unwrap();
         }
 
         self.builder
@@ -384,12 +397,25 @@ impl<'a, 'ctx, 'expr> ExprVisitor<'expr, BasicValueEnum<'ctx>> for LoweringConte
 
         for (i, val) in vals.iter().enumerate() {
             let offset_val = self.context.i64_type().const_int(i as u64, false);
+            let val_to_store = if val.is_int_value() {
+                let int_val = val.into_int_value();
+                if int_val.get_type().get_bit_width() < 64 {
+                    self.builder
+                        .build_int_z_extend(int_val, self.context.i64_type(), "zext")
+                        .unwrap()
+                        .into()
+                } else {
+                    *val
+                }
+            } else {
+                *val
+            };
             let gep = unsafe {
                 self.builder
                     .build_in_bounds_gep(self.context.i64_type(), ptr, &[offset_val], "gep")
                     .unwrap()
             };
-            self.builder.build_store(gep, *val).unwrap();
+            self.builder.build_store(gep, val_to_store).unwrap();
         }
 
         self.builder
@@ -495,9 +521,61 @@ impl<'a, 'ctx, 'expr> ExprVisitor<'expr, BasicValueEnum<'ctx>> for LoweringConte
     fn visit_variant(
         &mut self,
         _tag: &'expr str,
-        _payload: &'expr Expr<'expr>,
+        payload: &'expr Expr<'expr>,
     ) -> BasicValueEnum<'ctx> {
-        self.context.i64_type().const_zero().into()
+        let size_val = self.context.i64_type().const_int(16, false);
+        let align_val = self.context.i64_type().const_int(8, false);
+
+        let call = self
+            .builder
+            .build_call(
+                self.alloc_func,
+                &[size_val.into(), align_val.into()],
+                "alloc",
+            )
+            .unwrap();
+        let ptr = call
+            .try_as_basic_value()
+            .left()
+            .unwrap()
+            .into_pointer_value();
+
+        let zero_offset = self.context.i64_type().const_int(0, false);
+        let tag_gep = unsafe {
+            self.builder
+                .build_in_bounds_gep(self.context.i64_type(), ptr, &[zero_offset], "tag_gep")
+                .unwrap()
+        };
+        let tag_val = self.context.i64_type().const_int(0, false);
+        self.builder.build_store(tag_gep, tag_val).unwrap();
+
+        let payload_val = self.visit(payload);
+        let one_offset = self.context.i64_type().const_int(1, false);
+        let val_to_store = if payload_val.is_int_value() {
+            let int_val = payload_val.into_int_value();
+            if int_val.get_type().get_bit_width() < 64 {
+                self.builder
+                    .build_int_z_extend(int_val, self.context.i64_type(), "zext")
+                    .unwrap()
+                    .into()
+            } else {
+                payload_val
+            }
+        } else {
+            payload_val
+        };
+
+        let gep = unsafe {
+            self.builder
+                .build_in_bounds_gep(self.context.i64_type(), ptr, &[one_offset], "payload_gep")
+                .unwrap()
+        };
+        self.builder.build_store(gep, val_to_store).unwrap();
+
+        self.builder
+            .build_ptr_to_int(ptr, self.context.i64_type(), "ptr2int")
+            .unwrap()
+            .into()
     }
 
     fn visit_case(
@@ -706,6 +784,27 @@ impl<'a, 'ctx> LoweringContext<'a, 'ctx> {
 
                     self.compile_pattern_check(p, elem_val, succ_block, fail_bb);
                 }
+            }
+            Pattern::Variant(_tag, p) => {
+                let ptr = self
+                    .builder
+                    .build_int_to_ptr(
+                        val.into_int_value(),
+                        self.context.ptr_type(inkwell::AddressSpace::default()),
+                        "int2ptr",
+                    )
+                    .unwrap();
+                let one_offset = self.context.i64_type().const_int(1, false);
+                let gep = unsafe {
+                    self.builder
+                        .build_in_bounds_gep(self.context.i64_type(), ptr, &[one_offset], "gep")
+                        .unwrap()
+                };
+                let elem_val = self
+                    .builder
+                    .build_load(self.context.i64_type(), gep, "load")
+                    .unwrap();
+                self.compile_pattern_check(p, elem_val, match_bb, fail_bb);
             }
             _ => unimplemented!("pattern check for {:?}", pat),
         }
