@@ -204,6 +204,29 @@ impl<'a> TypeInference<'a> {
         )
     }
 
+    pub fn peel_constraints(
+        ty: &'a MonoType<'a>,
+    ) -> (Vec<(&'a str, &'a [&'a MonoType<'a>])>, &'a MonoType<'a>) {
+        let mut constraints = Vec::new();
+        let mut curr = ty.chase();
+        while let MonoType::Constraint(name, args, inner) = curr {
+            constraints.push((*name, *args));
+            curr = inner.chase();
+        }
+        (constraints, curr)
+    }
+
+    pub fn wrap_constraints(
+        &self,
+        constraints: Vec<(&'a str, &'a [&'a MonoType<'a>])>,
+        mut ty: &'a MonoType<'a>,
+    ) -> &'a MonoType<'a> {
+        for (name, args) in constraints.into_iter().rev() {
+            ty = self.ctx.alloc(MonoType::Constraint(name, args, ty));
+        }
+        ty
+    }
+
     fn occurs(tvar_id: usize, ty: &'a MonoType<'a>) -> bool {
         let ty = ty.chase();
         if let MonoType::TVar(id, _) = ty {
@@ -573,36 +596,118 @@ impl<'a> ExprVisitor<'a, Result<&'a MonoType<'a>, TypeError>> for TypeInference<
         f: &'a Expr<'a>,
         args: &'a [&'a Expr<'a>],
     ) -> Result<&'a MonoType<'a>, TypeError> {
-        let mut curr_f_ty = self.visit(f)?;
+        let curr_f_ty = self.visit(f)?;
+        let (constraints, inner_ty) = Self::peel_constraints(curr_f_ty);
 
-        // If function domain is a tuple and matching multiple arguments were passed,
-        // match them directly against the tuple domain elements.
-        let chased = curr_f_ty.chase();
-        let inner_ty = if let MonoType::Constraint(_, _, inner) = chased {
-            inner.chase()
-        } else {
-            chased
-        };
         if let MonoType::Fn(dom, ret) = inner_ty {
-            if let MonoType::Tuple(elem_tys) = dom.chase() {
+            let chased_dom = dom.chase();
+            if let MonoType::Tuple(elem_tys) = chased_dom {
+                // If single argument passed:
+                if args.len() == 1 {
+                    let arg_ty = self.visit(args[0])?;
+                    // If the single argument is a tuple matching domain length, unify directly
+                    if let MonoType::Tuple(arg_elem_tys) = arg_ty.chase() {
+                        if arg_elem_tys.len() == elem_tys.len() {
+                            self.unify(arg_ty, chased_dom)?;
+                            return Ok(self.wrap_constraints(constraints, ret));
+                        }
+                    }
+
+                    // Otherwise auto-curry: apply single argument to elem_tys[0]
+                    self.unify(arg_ty, elem_tys[0])?;
+                    let rem_tys = &elem_tys[1..];
+                    let rem_dom = if rem_tys.len() == 1 {
+                        rem_tys[0]
+                    } else {
+                        &*self
+                            .ctx
+                            .alloc(MonoType::Tuple(self.ctx.arena().alloc_slice_clone(rem_tys)))
+                    };
+                    let rem_fn = &*self.ctx.alloc(MonoType::Fn(rem_dom, ret));
+                    return Ok(self.wrap_constraints(constraints, rem_fn));
+                }
+
+                // If multiple arguments matching tuple domain length:
                 if elem_tys.len() == args.len() && args.len() > 1 {
                     for (arg, param_ty) in args.iter().zip(elem_tys.iter()) {
                         let arg_ty = self.visit(*arg)?;
                         self.unify(arg_ty, param_ty)?;
                     }
-                    return Ok(ret);
+                    return Ok(self.wrap_constraints(constraints, ret));
                 }
+
+                // If multiple arguments passed, but fewer than tuple domain length (partial application):
+                if args.len() > 1 && args.len() < elem_tys.len() {
+                    for (arg, param_ty) in args.iter().zip(elem_tys.iter()) {
+                        let arg_ty = self.visit(*arg)?;
+                        self.unify(arg_ty, param_ty)?;
+                    }
+                    let rem_tys = &elem_tys[args.len()..];
+                    let rem_dom = if rem_tys.len() == 1 {
+                        rem_tys[0]
+                    } else {
+                        &*self
+                            .ctx
+                            .alloc(MonoType::Tuple(self.ctx.arena().alloc_slice_clone(rem_tys)))
+                    };
+                    let rem_fn = &*self.ctx.alloc(MonoType::Fn(rem_dom, ret));
+                    return Ok(self.wrap_constraints(constraints, rem_fn));
+                }
+
+                // If more arguments passed than tuple domain length:
+                if args.len() > elem_tys.len() {
+                    for (arg, param_ty) in args[..elem_tys.len()].iter().zip(elem_tys.iter()) {
+                        let arg_ty = self.visit(*arg)?;
+                        self.unify(arg_ty, param_ty)?;
+                    }
+                    let mut curr_ty = self.wrap_constraints(constraints, ret);
+                    for arg in &args[elem_tys.len()..] {
+                        let ret_ty = self.fresh_tvar();
+                        let arg_ty = self.visit(*arg)?;
+                        let expected_f_ty = &*self.ctx.alloc(MonoType::Fn(arg_ty, ret_ty));
+                        self.unify(curr_ty, expected_f_ty)?;
+                        curr_ty = ret_ty;
+                    }
+                    return Ok(curr_ty);
+                }
+            } else if args.len() == 1 {
+                // Curried function applied to a tuple argument: e.g. (\x -> \y -> x + y) (1.0, 2.0)
+                let arg_ty = self.visit(args[0])?;
+                if let MonoType::Tuple(tup_elems) = arg_ty.chase() {
+                    if tup_elems.len() > 1 {
+                        let mut curried_params: Vec<&'a MonoType<'a>> = Vec::new();
+                        let mut cur = inner_ty;
+                        while let MonoType::Fn(param, next) = cur {
+                            curried_params.push(*param);
+                            cur = next.chase();
+                            if curried_params.len() == tup_elems.len() {
+                                break;
+                            }
+                        }
+                        if curried_params.len() == tup_elems.len() {
+                            for (elem, param) in tup_elems.iter().zip(curried_params.into_iter()) {
+                                self.unify(elem, param)?;
+                            }
+                            return Ok(self.wrap_constraints(constraints, cur));
+                        }
+                    }
+                }
+                let ret_ty = self.fresh_tvar();
+                let expected_f_ty = &*self.ctx.alloc(MonoType::Fn(arg_ty, ret_ty));
+                self.unify(curr_f_ty, expected_f_ty)?;
+                return Ok(ret_ty);
             }
         }
 
+        let mut curr_ty = curr_f_ty;
         for arg in args {
             let ret_ty = self.fresh_tvar();
             let arg_ty = self.visit(*arg)?;
             let expected_f_ty = &*self.ctx.alloc(MonoType::Fn(arg_ty, ret_ty));
-            self.unify(curr_f_ty, expected_f_ty)?;
-            curr_f_ty = ret_ty;
+            self.unify(curr_ty, expected_f_ty)?;
+            curr_ty = ret_ty;
         }
-        Ok(curr_f_ty)
+        Ok(curr_ty)
     }
 
     fn visit_if(

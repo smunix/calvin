@@ -153,10 +153,17 @@ where
                 None => e,
             });
 
-        let app = atom_annotated.clone().foldl(atom_annotated.clone().repeated(), move |f, arg| {
-            let args_slice = ctx.arena().alloc_slice_copy(&[arg]);
-            &*ctx.alloc(Expr::App(f, args_slice))
-        });
+        let app = atom_annotated
+            .clone()
+            .then(atom_annotated.clone().repeated().collect::<Vec<_>>())
+            .map(move |(f, args)| {
+                if args.is_empty() {
+                    f
+                } else {
+                    let args_slice = ctx.alloc_slice_clone(&args);
+                    &*ctx.alloc(Expr::App(f, args_slice))
+                }
+            });
 
         let op_mul = app.clone().foldl(
             choice((
@@ -213,14 +220,17 @@ where
         let lambda = just(Token::Lambda)
             .or(just(Token::Fn))
             .ignore_then(pat.clone().repeated().at_least(1).collect::<Vec<_>>())
-            .then_ignore(just(Token::Arrow).or(just(Token::Dot)))
+            .then(just(Token::Arrow).to(false).or(just(Token::Dot).to(true)))
             .then(expr.clone())
-            .map(move |(pats, body)| {
+            .map(move |((pats, is_dot), body)| {
                 if pats.len() == 1 {
                     &*ctx.alloc(Expr::Fn(pats[0].clone(), body))
-                } else {
+                } else if is_dot {
                     let tup_pat = Pattern::Tuple(ctx.alloc_slice_clone(&pats));
                     &*ctx.alloc(Expr::Fn(tup_pat, body))
+                } else {
+                    pats.into_iter()
+                        .rfold(body, |acc, p| &*ctx.alloc(Expr::Fn(p, acc)))
                 }
             });
 

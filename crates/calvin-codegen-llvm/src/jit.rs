@@ -239,6 +239,14 @@ impl<'a, 'ctx, 'expr> ExprVisitor<'expr, BasicValueEnum<'ctx>> for LoweringConte
                 }
             }
 
+            if flat_args.len() == 1 {
+                if let Expr::Tuple(elems) = flat_args[0] {
+                    if matches!(current_closure, Expr::Fn(Pattern::Var(_), _)) {
+                        flat_args = elems.to_vec();
+                    }
+                }
+            }
+
             let mut arg_idx = 0;
             while arg_idx < flat_args.len() {
                 if let Expr::Fn(pat, body) = current_closure {

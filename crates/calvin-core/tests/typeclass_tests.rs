@@ -79,3 +79,49 @@ fn test_hobbes_unsweeten_parity() {
         u3
     );
 }
+
+#[test]
+fn test_hobbes_curried_and_tuple_application() {
+    let ctx = TypeContext::new();
+
+    // 1. Hobbes tuple function with space-separated args: (\x y. x * y) 1.0 2.0
+    let mut typeinf = setup_typeinf(&ctx);
+    let ast = parse_expr(&ctx, r"(\x y. x * y) 1.0 2.0").expect("parse failed");
+    let ty = typeinf.visit(ast).expect("infer failed");
+    typeinf.solve_constraints().expect("solve failed");
+    let residuals = typeinf.residual_constraints();
+    assert_eq!(format_qual_type(ty, &residuals), "double");
+
+    // 2. Hobbes tuple function with tuple arg: (\x y. x * y) (1.0, 2.0)
+    let mut typeinf = setup_typeinf(&ctx);
+    let ast = parse_expr(&ctx, r"(\x y. x * y) (1.0, 2.0)").expect("parse failed");
+    let ty = typeinf.visit(ast).expect("infer failed");
+    typeinf.solve_constraints().expect("solve failed");
+    let residuals = typeinf.residual_constraints();
+    assert_eq!(format_qual_type(ty, &residuals), "double");
+
+    // 3. Curried function with space-separated args: (\x -> \y -> x * y) 1.0 2.0
+    let mut typeinf = setup_typeinf(&ctx);
+    let ast = parse_expr(&ctx, r"(\x -> \y -> x * y) 1.0 2.0").expect("parse failed");
+    let ty = typeinf.visit(ast).expect("infer failed");
+    typeinf.solve_constraints().expect("solve failed");
+    let residuals = typeinf.residual_constraints();
+    assert_eq!(format_qual_type(ty, &residuals), "double");
+
+    // 4. Curried function with tuple arg: (\x -> \y -> x * y) (1.0, 2.0)
+    let mut typeinf = setup_typeinf(&ctx);
+    let ast = parse_expr(&ctx, r"(\x -> \y -> x * y) (1.0, 2.0)").expect("parse failed");
+    let ty = typeinf.visit(ast).expect("infer failed");
+    typeinf.solve_constraints().expect("solve failed");
+    let residuals = typeinf.residual_constraints();
+    assert_eq!(format_qual_type(ty, &residuals), "double");
+
+    // 5. Hobbes `fn` syntax: (fn x y. x * y) 1.0 2.0
+    let mut typeinf = setup_typeinf(&ctx);
+    let ast = parse_expr(&ctx, r"(fn x y. x * y) 1.0 2.0").expect("parse failed");
+    let ty = typeinf.visit(ast).expect("infer failed");
+    typeinf.solve_constraints().expect("solve failed");
+    let residuals = typeinf.residual_constraints();
+    assert_eq!(format_qual_type(ty, &residuals), "double");
+}
+
