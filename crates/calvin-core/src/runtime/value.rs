@@ -1,5 +1,66 @@
 use crate::lang::types::{MonoType, Prim};
 
+/// Value Object representing a raw untyped 64-bit runtime value produced by JIT execution.
+/// In Calvin and Hobbes, JIT function return values and record/tuple slots are represented as 64-bit words,
+/// which may encode primitive numerics directly or hold memory addresses of heap-allocated structures.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct RawValue(pub u64);
+
+impl RawValue {
+    pub const fn from_raw(raw: u64) -> Self {
+        Self(raw)
+    }
+
+    pub const fn as_u64(self) -> u64 {
+        self.0
+    }
+
+    pub fn as_ptr<T>(self) -> *const T {
+        self.0 as *const T
+    }
+
+    pub fn as_mut_ptr<T>(self) -> *mut T {
+        self.0 as *mut T
+    }
+
+    pub fn is_null(self) -> bool {
+        self.0 == 0
+    }
+
+    pub fn as_bool(self) -> bool {
+        (self.0 as u8) != 0
+    }
+
+    pub fn as_i64(self) -> i64 {
+        self.0 as i64
+    }
+
+    pub fn as_f64(self) -> f64 {
+        f64::from_bits(self.0)
+    }
+
+    /// Format this runtime value according to its statically inferred `MonoType`.
+    ///
+    /// # Safety
+    /// For heap-allocated types (Records, Tuples, Variants, Arrays), the pointer representation
+    /// within `self.0` must point to valid memory allocated by `calvin_alloc`.
+    pub unsafe fn format<'a>(self, ty: &'a MonoType<'a>) -> String {
+        format_runtime_value(self.0, ty)
+    }
+}
+
+impl From<u64> for RawValue {
+    fn from(val: u64) -> Self {
+        Self(val)
+    }
+}
+
+impl From<RawValue> for u64 {
+    fn from(val: RawValue) -> Self {
+        val.0
+    }
+}
+
 /// Pretty-prints a runtime value returned by JIT compilation given its statically inferred `MonoType`.
 ///
 /// # Safety

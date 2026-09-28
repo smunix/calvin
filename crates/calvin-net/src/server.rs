@@ -1,4 +1,5 @@
 use crate::connection::Connection;
+use crate::protocol::ExprId;
 use std::collections::HashMap;
 use std::io;
 use std::sync::{Arc, Mutex};
@@ -8,7 +9,7 @@ type JittedFn = Arc<dyn Fn(&[u8]) -> Vec<u8> + Send + Sync>;
 
 #[derive(Clone)]
 pub struct ServerState {
-    expressions: Arc<Mutex<HashMap<u32, JittedFn>>>,
+    expressions: Arc<Mutex<HashMap<ExprId, JittedFn>>>,
     next_id: Arc<Mutex<u32>>,
 }
 
@@ -20,18 +21,19 @@ impl ServerState {
         }
     }
 
-    pub fn register(&self, func: JittedFn) -> u32 {
+    pub fn register(&self, func: JittedFn) -> ExprId {
         let mut id_guard = self.next_id.lock().unwrap();
-        let id = *id_guard;
+        let id = ExprId(*id_guard);
         *id_guard += 1;
         self.expressions.lock().unwrap().insert(id, func);
         id
     }
 
-    pub fn invoke(&self, id: u32, payload: &[u8]) -> Option<Vec<u8>> {
+    pub fn invoke(&self, id: impl Into<ExprId>, payload: &[u8]) -> Option<Vec<u8>> {
+        let expr_id = id.into();
         let func = {
             let guard = self.expressions.lock().unwrap();
-            guard.get(&id).cloned()
+            guard.get(&expr_id).cloned()
         };
         func.map(|f| f(payload))
     }

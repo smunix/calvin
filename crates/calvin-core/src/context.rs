@@ -40,6 +40,10 @@ impl TypeContext {
         id
     }
 
+    pub fn fresh_tvar(&self) -> crate::lang::types::TVarId {
+        crate::lang::types::TVarId(self.fresh_tvar_id())
+    }
+
     pub fn reset(&mut self) {
         self.arena.reset();
         self.uid_ctr.set(0);

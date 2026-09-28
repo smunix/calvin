@@ -1,5 +1,69 @@
 use std::cell::Cell;
 
+/// Value Object representing a unique Hindley-Milner type variable identifier.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct TVarId(pub usize);
+
+impl TVarId {
+    pub const fn new(id: usize) -> Self {
+        Self(id)
+    }
+
+    pub const fn as_usize(self) -> usize {
+        self.0
+    }
+}
+
+impl std::fmt::Display for TVarId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl From<usize> for TVarId {
+    fn from(id: usize) -> Self {
+        Self(id)
+    }
+}
+
+impl From<TVarId> for usize {
+    fn from(id: TVarId) -> Self {
+        id.0
+    }
+}
+
+/// Value Object representing a Skolemized type generator variable identifier.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct TGenId(pub usize);
+
+impl TGenId {
+    pub const fn new(id: usize) -> Self {
+        Self(id)
+    }
+
+    pub const fn as_usize(self) -> usize {
+        self.0
+    }
+}
+
+impl std::fmt::Display for TGenId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl From<usize> for TGenId {
+    fn from(id: usize) -> Self {
+        Self(id)
+    }
+}
+
+impl From<TGenId> for usize {
+    fn from(id: TGenId) -> Self {
+        id.0
+    }
+}
+
 /// Primitive types supported by Calvin, matching Hobbes parity.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Prim {
@@ -59,21 +123,75 @@ impl<'a> MonoType<'a> {
         }
         current
     }
+    pub fn is_primitive(&'a self) -> bool {
+        matches!(self.chase(), MonoType::Prim(_))
+    }
+
+    pub fn is_function(&'a self) -> bool {
+        matches!(self.chase(), MonoType::Fn(_, _))
+    }
+
+    pub fn is_record(&'a self) -> bool {
+        matches!(self.chase(), MonoType::Record(_, _))
+    }
+
+    pub fn is_variant(&'a self) -> bool {
+        matches!(self.chase(), MonoType::Variant(_, _))
+    }
+
+    pub fn is_tvar(&'a self) -> bool {
+        matches!(self.chase(), MonoType::TVar(_, _))
+    }
 }
 
 /// A type class constraint, e.g., `(Add a b c)`.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Constraint<'a> {
     pub class_name: &'a str,
     pub arguments: &'a [&'a MonoType<'a>],
 }
 
+impl<'a> Constraint<'a> {
+    pub fn new(class_name: &'a str, arguments: &'a [&'a MonoType<'a>]) -> Self {
+        Self {
+            class_name,
+            arguments,
+        }
+    }
+
+    pub fn class_name(&self) -> &'a str {
+        self.class_name
+    }
+
+    pub fn arguments(&self) -> &'a [&'a MonoType<'a>] {
+        self.arguments
+    }
+}
+
 /// A qualified type, which is a structural monotype guarded by a set of constraints.
 /// e.g., `(Add a b c) => a -> b -> c`
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct QualType<'a> {
     pub constraints: &'a [Constraint<'a>],
     pub ty: &'a MonoType<'a>,
+}
+
+impl<'a> QualType<'a> {
+    pub fn new(constraints: &'a [Constraint<'a>], ty: &'a MonoType<'a>) -> Self {
+        Self { constraints, ty }
+    }
+
+    pub fn constraints(&self) -> &'a [Constraint<'a>] {
+        self.constraints
+    }
+
+    pub fn ty(&self) -> &'a MonoType<'a> {
+        self.ty
+    }
+
+    pub fn is_monomorphic(&self) -> bool {
+        self.constraints.is_empty()
+    }
 }
 
 use crate::context::TypeContext;

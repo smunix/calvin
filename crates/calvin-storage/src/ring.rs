@@ -7,6 +7,87 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 pub const RING_HEADER_MAGIC: u32 = 0x51000001;
 
+/// Value Object representing the shared-memory ring buffer magic identifier.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct RingMagic(pub u32);
+
+impl RingMagic {
+    pub const DEFAULT: Self = Self(RING_HEADER_MAGIC);
+
+    pub const fn is_valid(self) -> bool {
+        self.0 == RING_HEADER_MAGIC
+    }
+
+    pub const fn as_u32(self) -> u32 {
+        self.0
+    }
+}
+
+impl Default for RingMagic {
+    fn default() -> Self {
+        Self::DEFAULT
+    }
+}
+
+/// Value Object representing the ring buffer protocol/layout version.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct RingVersion(pub u32);
+
+impl RingVersion {
+    pub const V1: Self = Self(1);
+
+    pub const fn is_supported(self) -> bool {
+        self.0 == 1
+    }
+
+    pub const fn as_u32(self) -> u32 {
+        self.0
+    }
+}
+
+impl Default for RingVersion {
+    fn default() -> Self {
+        Self::V1
+    }
+}
+
+/// Value Object representing the validated storage capacity of a ring buffer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct RingCapacity(pub u64);
+
+impl RingCapacity {
+    pub fn new(capacity: u64) -> io::Result<Self> {
+        if capacity == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Ring capacity must be greater than zero",
+            ));
+        }
+        Ok(Self(capacity))
+    }
+
+    pub const fn as_u64(self) -> u64 {
+        self.0
+    }
+
+    pub const fn as_usize(self) -> usize {
+        self.0 as usize
+    }
+}
+
+impl From<u64> for RingCapacity {
+    fn from(cap: u64) -> Self {
+        Self(cap)
+    }
+}
+
+impl From<RingCapacity> for u64 {
+    fn from(cap: RingCapacity) -> Self {
+        cap.0
+    }
+}
+
+/// Aggregate descriptor for shared-memory ring buffer headers.
 #[repr(C)]
 pub struct RingHeader {
     pub magic: u32,
@@ -16,6 +97,25 @@ pub struct RingHeader {
     pub read_idx: AtomicU64,
 }
 
+impl RingHeader {
+    pub fn ring_magic(&self) -> RingMagic {
+        RingMagic(self.magic)
+    }
+
+    pub fn ring_version(&self) -> RingVersion {
+        RingVersion(self.version)
+    }
+
+    pub fn ring_capacity(&self) -> RingCapacity {
+        RingCapacity(self.capacity)
+    }
+
+    pub fn is_valid(&self) -> bool {
+        self.ring_magic().is_valid() && self.ring_version().is_supported()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum QoS {
     Reliable,
     Unreliable,

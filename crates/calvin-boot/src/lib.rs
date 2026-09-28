@@ -97,11 +97,66 @@ pub fn init_bootstrap_with_defs<'ctx>(
     // 1. Process all boot scripts in alphabetical order
     for (_name, content) in BOOT_SCRIPTS {
         if let Ok(module) = parse_module(ctx, content) {
-            load_module_defs(ctx, &module.defs, &mut base_env, &mut registry, &mut fn_defs);
+            load_module_defs(ctx, module.defs(), &mut base_env, &mut registry, &mut fn_defs);
         }
     }
 
     Ok((Rc::new(base_env), Rc::new(registry), Rc::new(fn_defs)))
+}
+
+/// Aggregate Root representing the fully initialized Calvin/Hobbes bootstrap environment.
+#[derive(Clone)]
+pub struct BootEnvironment<'ctx> {
+    env: Rc<TypeEnv<'ctx>>,
+    registry: Rc<TypeClassRegistry<'ctx>>,
+    fn_defs: Rc<HashMap<String, &'ctx Expr<'ctx>>>,
+}
+
+impl<'ctx> BootEnvironment<'ctx> {
+    pub fn new(
+        env: Rc<TypeEnv<'ctx>>,
+        registry: Rc<TypeClassRegistry<'ctx>>,
+        fn_defs: Rc<HashMap<String, &'ctx Expr<'ctx>>>,
+    ) -> Self {
+        Self {
+            env,
+            registry,
+            fn_defs,
+        }
+    }
+
+    pub fn env(&self) -> &Rc<TypeEnv<'ctx>> {
+        &self.env
+    }
+
+    pub fn registry(&self) -> &Rc<TypeClassRegistry<'ctx>> {
+        &self.registry
+    }
+
+    pub fn fn_defs(&self) -> &Rc<HashMap<String, &'ctx Expr<'ctx>>> {
+        &self.fn_defs
+    }
+
+    pub fn fn_def(&self, name: &str) -> Option<&'ctx Expr<'ctx>> {
+        self.fn_defs.get(name).copied()
+    }
+
+    pub fn into_parts(
+        self,
+    ) -> (
+        Rc<TypeEnv<'ctx>>,
+        Rc<TypeClassRegistry<'ctx>>,
+        Rc<HashMap<String, &'ctx Expr<'ctx>>>,
+    ) {
+        (self.env, self.registry, self.fn_defs)
+    }
+}
+
+pub fn init_boot_environment<'ctx>(
+    ctx: &'ctx TypeContext,
+) -> Result<BootEnvironment<'ctx>, String> {
+    let (env, reg, fn_defs) = init_bootstrap_with_defs(ctx)?;
+    Ok(BootEnvironment::new(env, reg, fn_defs))
 }
 
 pub fn init_bootstrap<'ctx>(
@@ -490,5 +545,15 @@ mod tests {
         let residuals = typeinf.residual_constraints();
         let formatted = calvin_core::lang::types::format_qual_type(ty, &residuals);
         assert_eq!(formatted, "Convert a b => (a) -> b");
+    }
+
+    #[test]
+    fn test_boot_environment_aggregate() {
+        let ctx = TypeContext::new();
+        let boot_env = init_boot_environment(&ctx).expect("init boot env failed");
+
+        assert!(boot_env.env().lookup("+").is_some());
+        assert!(boot_env.registry().classes.contains_key("Add"));
+        assert!(boot_env.fn_def("toLower").is_some());
     }
 }
