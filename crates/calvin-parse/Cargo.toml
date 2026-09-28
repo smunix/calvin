@@ -8,3 +8,5 @@ calvin-core = { path = "../calvin-core" }
 logos = { workspace = true }
 chumsky = { workspace = true }
 ariadne = { workspace = true }
+itertools = { workspace = true }
+

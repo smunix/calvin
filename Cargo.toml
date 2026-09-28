@@ -16,10 +16,11 @@ repository = "https://github.com/smunix/calvin" # Placeholder
 
 [workspace.dependencies]
 bumpalo = "3.16"
-chumsky = "1.0.0-alpha.7"
+chumsky = { version = "1.0.0-alpha.7", features = ["pratt"] }
 logos = "0.14"
 ariadne = "0.4"
 inkwell = { version = "0.5.0", features = ["llvm18-0"] }
+itertools = "0.13"
 
 [profile.release]
 lto = true

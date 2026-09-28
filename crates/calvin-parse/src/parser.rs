@@ -825,16 +825,13 @@ pub fn parse_expr<'ctx>(
     src: &'ctx str,
 ) -> Result<&'ctx Expr<'ctx>, String> {
     use logos::Logos;
-    let lex = Token::lexer(src);
-    let token_iter = lex.spanned().map(|(tok, span)| match tok {
-        Ok(t) => Ok((t, span)),
-        Err(e) => Err((e, span)),
-    });
-
-    let mut tokens = Vec::new();
-    for t in token_iter {
-        tokens.push(t.map_err(|(e, span)| format!("Lex error at {:?}: {:?}", span, e))?);
-    }
+    let tokens = Token::lexer(src)
+        .spanned()
+        .map(|(tok, span)| match tok {
+            Ok(t) => Ok((t, span)),
+            Err(e) => Err(format!("Lex error at {:?}: {:?}", span, e)),
+        })
+        .collect::<Result<Vec<_>, _>>()?;
 
     let eof = src.len()..src.len();
     let token_stream = chumsky::input::Stream::from_iter(tokens).map(eof, |(t, s)| (t, s));
@@ -848,16 +845,13 @@ pub fn parse_expr<'ctx>(
 
 pub fn parse_module<'ctx>(ctx: &'ctx TypeContext, src: &'ctx str) -> Result<Module<'ctx>, String> {
     use logos::Logos;
-    let lex = Token::lexer(src);
-    let token_iter = lex.spanned().map(|(tok, span)| match tok {
-        Ok(t) => Ok((t, span)),
-        Err(e) => Err((e, span)),
-    });
-
-    let mut tokens = Vec::new();
-    for t in token_iter {
-        tokens.push(t.map_err(|(e, span)| format!("Lex error at {:?}: {:?}", span, e))?);
-    }
+    let tokens = Token::lexer(src)
+        .spanned()
+        .map(|(tok, span)| match tok {
+            Ok(t) => Ok((t, span)),
+            Err(e) => Err(format!("Lex error at {:?}: {:?}", span, e)),
+        })
+        .collect::<Result<Vec<_>, _>>()?;
 
     let eof = src.len()..src.len();
     let token_stream = chumsky::input::Stream::from_iter(tokens).map(eof, |(t, s)| (t, s));

@@ -10,3 +10,5 @@ cranelift-frontend = "0.113"
 cranelift-jit = "0.113"
 cranelift-module = "0.113"
 cranelift-native = "0.113"
+itertools = { workspace = true }
+

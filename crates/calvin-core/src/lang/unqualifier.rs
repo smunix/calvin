@@ -90,14 +90,7 @@ impl<'a, 'map> ExprVisitor<'a, &'a Expr<'a>> for UnqualifierPass<'a, 'map> {
 
     fn visit_app(&mut self, f: &'a Expr<'a>, args: &'a [&'a Expr<'a>]) -> &'a Expr<'a> {
         let new_f = self.visit(f);
-        let mut new_args = Vec::new();
-
-        // Dictionary passing removed: Hobbes does not use dictionary passing.
-        // It relies on monomorphization and inline structural resolution.
-
-        for arg in args {
-            new_args.push(self.visit(arg));
-        }
+        let new_args: Vec<_> = args.iter().map(|arg| self.visit(arg)).collect();
         let new_args_slice = self.ctx.arena().alloc_slice_copy(&new_args);
         self.ctx.arena().alloc(Expr::App(new_f, new_args_slice))
     }

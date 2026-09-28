@@ -86,75 +86,59 @@ impl<'a> TypeClassRegistry<'a> {
             None => return unifications,
         };
 
-        for (from_indices, to_indices) in &class_def.fundeps {
+        class_def.fundeps.iter().for_each(|(from_indices, to_indices)| {
             // Check if all `from_indices` are concrete / without free type variables
             let from_concrete = from_indices.iter().all(|&idx| {
-                if idx < args.len() {
-                    !has_free_tvars(args[idx].chase())
-                } else {
-                    false
-                }
+                idx < args.len() && !has_free_tvars(args[idx].chase())
             });
 
-            if !from_concrete {
-                continue;
-            }
-
-            // Find matching instances
-            let matching_insts: Vec<&InstanceDef<'a>> = instances
-                .iter()
-                .filter(|inst| {
-                    if inst.types.len() != args.len() {
-                        return false;
-                    }
-                    from_indices
-                        .iter()
-                        .all(|&idx| types_match(args[idx].chase(), inst.types[idx].chase()))
-                })
-                .collect();
-
-            // If there's a match, refine `to_indices`
-            if !matching_insts.is_empty() {
-                for &to_idx in to_indices {
-                    if to_idx < args.len() {
-                        let target_ty = args[to_idx].chase();
-                        if has_free_tvars(target_ty) {
-                            let candidate_ty = matching_insts[0].types[to_idx].chase();
-                            let all_agree = matching_insts
+            if from_concrete {
+                // Find matching instances
+                let matching_insts: Vec<&InstanceDef<'a>> = instances
+                    .iter()
+                    .filter(|inst| {
+                        inst.types.len() == args.len()
+                            && from_indices
                                 .iter()
-                                .all(|inst| types_match(inst.types[to_idx].chase(), candidate_ty));
-                            if all_agree {
-                                unifications.push((args[to_idx], candidate_ty));
+                                .all(|&idx| types_match(args[idx].chase(), inst.types[idx].chase()))
+                    })
+                    .collect();
+
+                // If there's a match, refine `to_indices`
+                if let Some(first_match) = matching_insts.first() {
+                    to_indices.iter().for_each(|&to_idx| {
+                        if to_idx < args.len() {
+                            let target_ty = args[to_idx].chase();
+                            if has_free_tvars(target_ty) {
+                                let candidate_ty = first_match.types[to_idx].chase();
+                                let all_agree = matching_insts
+                                    .iter()
+                                    .all(|inst| types_match(inst.types[to_idx].chase(), candidate_ty));
+                                if all_agree {
+                                    unifications.push((args[to_idx], candidate_ty));
+                                }
                             }
                         }
-                    }
+                    });
                 }
             }
-        }
+        });
 
         unifications
     }
 
     /// Check if a constraint is fully satisfied by a ground instance.
     pub fn is_satisfied(&self, class_name: &str, args: &[&'a MonoType<'a>]) -> bool {
-        let instances = match self.instances.get(class_name) {
-            Some(insts) => insts,
-            None => return false,
-        };
-
-        for inst in instances {
-            if inst.types.len() != args.len() {
-                continue;
-            }
-            let matches = args
-                .iter()
-                .zip(inst.types.iter())
-                .all(|(a, b)| types_match(a.chase(), b.chase()));
-            if matches && inst.context.is_empty() {
-                return true;
-            }
-        }
-        false
+        self.instances.get(class_name).is_some_and(|instances| {
+            instances.iter().any(|inst| {
+                inst.types.len() == args.len()
+                    && inst.context.is_empty()
+                    && args
+                        .iter()
+                        .zip(inst.types.iter())
+                        .all(|(a, b)| types_match(a.chase(), b.chase()))
+            })
+        })
     }
 
     /// Generate a detailed Hobbes-parity explanation when a constraint cannot be satisfied.

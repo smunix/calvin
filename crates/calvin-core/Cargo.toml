@@ -8,6 +8,8 @@ cbindgen = "0.26.0"
 
 [dependencies]
 bumpalo = { workspace = true }
+itertools = { workspace = true }
+
 
 [dev-dependencies]
 calvin-parse = { path = "../calvin-parse" }

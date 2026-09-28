@@ -5,6 +5,7 @@ use calvin_core::lang::typeinf::TypeEnv;
 use calvin_core::lang::types::{MonoType, Prim};
 use calvin_parse::ast::{ModuleDef, TypeExpr, VarTypeDef};
 use calvin_parse::parse_module;
+use itertools::Itertools;
 use std::collections::HashMap;
 use std::rc::Rc;
 
@@ -80,11 +81,13 @@ fn init_builtin_env<'ctx>(
     let tgen1: &'ctx MonoType<'ctx> = &*ctx.alloc(MonoType::TGen(1));
     base_env.insert("id", ctx.alloc(MonoType::Fn(tgen0, tgen0)));
 
-    for &(op, from_prim, to_prim) in NUMERIC_CONVERSIONS {
-        let from_ty = ctx.alloc(MonoType::Prim(from_prim));
-        let to_ty = ctx.alloc(MonoType::Prim(to_prim));
-        base_env.insert(op, ctx.alloc(MonoType::Fn(from_ty, to_ty)));
-    }
+    NUMERIC_CONVERSIONS
+        .iter()
+        .for_each(|&(op, from_prim, to_prim)| {
+            let from_ty = ctx.alloc(MonoType::Prim(from_prim));
+            let to_ty = ctx.alloc(MonoType::Prim(to_prim));
+            base_env.insert(op, ctx.alloc(MonoType::Fn(from_ty, to_ty)));
+        });
 
     // Hobbes builtin primitive type class: Convert a b => (a) -> b
     registry.register_class("Convert", vec!["a", "b"], Vec::new(), HashMap::new());
@@ -112,13 +115,15 @@ pub fn init_bootstrap_with_defs<'ctx>(
     init_builtin_env(ctx, &mut base_env, &mut registry);
 
     let id_fn = &*ctx.alloc(Expr::Fn(Pattern::Var("x"), ctx.alloc(Expr::Var("x"))));
-    for &fn_name in BUILTIN_PASSTHROUGH_FNS {
+    BUILTIN_PASSTHROUGH_FNS.iter().for_each(|&fn_name| {
         fn_defs.insert(fn_name.to_string(), id_fn);
-    }
+    });
 
     // 1. Process all boot scripts in alphabetical order
-    for (_name, content) in BOOT_SCRIPTS {
-        if let Ok(module) = parse_module(ctx, content) {
+    BOOT_SCRIPTS
+        .iter()
+        .filter_map(|(_name, content)| parse_module(ctx, content).ok())
+        .for_each(|module| {
             load_module_defs(
                 ctx,
                 module.defs(),
@@ -126,8 +131,7 @@ pub fn init_bootstrap_with_defs<'ctx>(
                 &mut registry,
                 &mut fn_defs,
             );
-        }
-    }
+        });
 
     Ok((Rc::new(base_env), Rc::new(registry), Rc::new(fn_defs)))
 }
@@ -201,25 +205,23 @@ fn load_module_defs<'ctx>(
     registry: &mut TypeClassRegistry<'ctx>,
     fn_defs: &mut HashMap<String, &'ctx Expr<'ctx>>,
 ) {
-    for def in defs {
-        match def {
-            ModuleDef::Class(class_def) => {
-                load_class_def(ctx, class_def, base_env, registry);
-            }
-            ModuleDef::Instance(inst_def) => {
-                load_instance_def(ctx, inst_def, registry, fn_defs);
-            }
-            ModuleDef::VarType(vtd) => {
-                load_var_type_def(ctx, vtd, base_env);
-            }
-            ModuleDef::VarDef(vd) => {
-                load_var_def(ctx, vd, fn_defs);
-            }
-            ModuleDef::Data(_) => {
-                // Type alias / data vector definitions in boot scripts
-            }
+    defs.iter().for_each(|def| match def {
+        ModuleDef::Class(class_def) => {
+            load_class_def(ctx, class_def, base_env, registry);
         }
-    }
+        ModuleDef::Instance(inst_def) => {
+            load_instance_def(ctx, inst_def, registry, fn_defs);
+        }
+        ModuleDef::VarType(vtd) => {
+            load_var_type_def(ctx, vtd, base_env);
+        }
+        ModuleDef::VarDef(vd) => {
+            load_var_def(ctx, vd, fn_defs);
+        }
+        ModuleDef::Data(_) => {
+            // Type alias / data vector definitions in boot scripts
+        }
+    });
 }
 
 fn load_class_def<'ctx>(
@@ -228,18 +230,21 @@ fn load_class_def<'ctx>(
     base_env: &mut TypeEnv<'ctx>,
     registry: &mut TypeClassRegistry<'ctx>,
 ) {
-    let mut fundeps = Vec::new();
-    for (from_names, to_names) in &class_def.fundeps {
-        let from_indices: Vec<usize> = from_names
-            .iter()
-            .filter_map(|name| class_def.params.iter().position(|p| p == name))
-            .collect();
-        let to_indices: Vec<usize> = to_names
-            .iter()
-            .filter_map(|name| class_def.params.iter().position(|p| p == name))
-            .collect();
-        fundeps.push((from_indices, to_indices));
-    }
+    let fundeps: Vec<_> = class_def
+        .fundeps
+        .iter()
+        .map(|(from_names, to_names)| {
+            let from_indices: Vec<usize> = from_names
+                .iter()
+                .filter_map(|name| class_def.params.iter().position(|p| p == name))
+                .collect();
+            let to_indices: Vec<usize> = to_names
+                .iter()
+                .filter_map(|name| class_def.params.iter().position(|p| p == name))
+                .collect();
+            (from_indices, to_indices)
+        })
+        .collect();
 
     registry.register_class(
         class_def.name,
@@ -258,7 +263,7 @@ fn load_class_def<'ctx>(
         .collect();
     let gen_slice = ctx.arena().alloc_slice_clone(&gen_tys);
 
-    for member in &class_def.members {
+    class_def.members.iter().for_each(|member| {
         let op_name = strip_parens(member.name);
 
         let inner_fn = if class_def.params.len() == 3
@@ -285,7 +290,7 @@ fn load_class_def<'ctx>(
         if op_name != member.name {
             base_env.insert(member.name, cst_ty);
         }
-    }
+    });
 }
 
 fn load_instance_def<'ctx>(
@@ -295,13 +300,13 @@ fn load_instance_def<'ctx>(
     fn_defs: &mut HashMap<String, &'ctx Expr<'ctx>>,
 ) {
     let var_map = HashMap::new();
-    let mut ground_tys = Vec::new();
-    for te in &inst_def.types {
-        let mty = lower_type_expr(ctx, te, &var_map);
-        ground_tys.push(mty);
-    }
+    let ground_tys: Vec<&'ctx MonoType<'ctx>> = inst_def
+        .types
+        .iter()
+        .map(|te| lower_type_expr(ctx, te, &var_map))
+        .collect();
     registry.register_instance(inst_def.class_name, ground_tys, Vec::new(), HashMap::new());
-    for vd in &inst_def.members {
+    inst_def.members.iter().for_each(|vd| {
         let fn_expr = curry_fn(ctx, &vd.args, vd.body);
         let op_name = strip_parens(vd.name);
         if inst_def.class_name != "Convert" {
@@ -310,7 +315,7 @@ fn load_instance_def<'ctx>(
                 fn_defs.insert(vd.name.to_string(), fn_expr);
             }
         }
-    }
+    });
 }
 
 fn load_var_type_def<'ctx>(
@@ -342,32 +347,40 @@ fn lower_var_type_def<'ctx>(
     ctx: &'ctx TypeContext,
     var_type_def: &VarTypeDef<'ctx>,
 ) -> (&'ctx MonoType<'ctx>, &'ctx str) {
-    let mut type_vars = Vec::new();
-    collect_type_vars(&var_type_def.ty.ty, &mut type_vars);
-    for constraint in &var_type_def.ty.context {
+    let mut raw_vars = Vec::new();
+    collect_type_vars(&var_type_def.ty.ty, &mut raw_vars);
+    var_type_def.ty.context.iter().for_each(|constraint| {
         if let calvin_parse::ast::TypeConstraint::Class(_, constraint_args) = constraint {
-            for arg in constraint_args {
-                collect_type_vars(arg, &mut type_vars);
-            }
+            constraint_args.iter().for_each(|arg| {
+                collect_type_vars(arg, &mut raw_vars);
+            });
         }
-    }
-    let mut var_map = HashMap::new();
-    for (i, v) in type_vars.iter().enumerate() {
-        var_map.insert(*v, &*ctx.alloc(MonoType::TGen(i)));
-    }
+    });
+    let type_vars = raw_vars.into_iter().unique().collect_vec();
+    let var_map: HashMap<&'ctx str, &'ctx MonoType<'ctx>> = type_vars
+        .iter()
+        .enumerate()
+        .map(|(i, &v)| (v, &*ctx.alloc(MonoType::TGen(i))))
+        .collect();
 
     let inner_ty = lower_type_expr(ctx, &var_type_def.ty.ty, &var_map);
-    let mut final_ty = inner_ty;
-    for constraint in var_type_def.ty.context.iter().rev() {
-        if let calvin_parse::ast::TypeConstraint::Class(class_name, constraint_args) = constraint {
-            let carg_tys: Vec<&'ctx MonoType<'ctx>> = constraint_args
-                .iter()
-                .map(|arg| lower_type_expr(ctx, arg, &var_map))
-                .collect();
-            let carg_slice = ctx.arena().alloc_slice_clone(&carg_tys);
-            final_ty = ctx.alloc(MonoType::Constraint(class_name, carg_slice, final_ty));
-        }
-    }
+    let final_ty = var_type_def
+        .ty
+        .context
+        .iter()
+        .rev()
+        .fold(inner_ty, |acc, constraint| {
+            if let calvin_parse::ast::TypeConstraint::Class(class_name, constraint_args) = constraint {
+                let carg_tys: Vec<&'ctx MonoType<'ctx>> = constraint_args
+                    .iter()
+                    .map(|arg| lower_type_expr(ctx, arg, &var_map))
+                    .collect();
+                let carg_slice = ctx.arena().alloc_slice_clone(&carg_tys);
+                ctx.alloc(MonoType::Constraint(class_name, carg_slice, acc))
+            } else {
+                acc
+            }
+        });
 
     let var_name = strip_parens(var_type_def.name);
     (final_ty, var_name)
@@ -376,15 +389,13 @@ fn lower_var_type_def<'ctx>(
 fn collect_type_vars<'a>(type_expr: &TypeExpr<'a>, vars: &mut Vec<&'a str>) {
     match type_expr {
         TypeExpr::Var(var_name) => {
-            if !vars.contains(var_name) {
-                vars.push(var_name);
-            }
+            vars.push(var_name);
         }
         TypeExpr::Prim(_) => {}
         TypeExpr::Tuple(elem_types) => {
-            for elem_type in elem_types {
+            elem_types.iter().for_each(|elem_type| {
                 collect_type_vars(elem_type, vars);
-            }
+            });
         }
         TypeExpr::Fn(domain, codomain) => {
             collect_type_vars(domain, vars);
@@ -395,9 +406,9 @@ fn collect_type_vars<'a>(type_expr: &TypeExpr<'a>, vars: &mut Vec<&'a str>) {
         }
         TypeExpr::App(head, type_args) => {
             collect_type_vars(head, vars);
-            for arg in type_args {
+            type_args.iter().for_each(|arg| {
                 collect_type_vars(arg, vars);
-            }
+            });
         }
     }
 }

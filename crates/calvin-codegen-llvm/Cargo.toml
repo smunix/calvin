@@ -6,3 +6,5 @@ edition = "2021"
 [dependencies]
 calvin-core = { path = "../calvin-core" }
 inkwell = { workspace = true }
+itertools = { workspace = true }
+

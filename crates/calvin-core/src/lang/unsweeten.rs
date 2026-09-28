@@ -2,6 +2,7 @@ use crate::context::TypeContext;
 use crate::lang::expr::{Expr, Literal, Pattern};
 use crate::lang::typeinf::TypeInference;
 use crate::lang::types::{format_mono_no_simpl, MonoType, Prim};
+use itertools::Itertools;
 
 /// Recursively desugars lambda expressions matching Hobbes pattern compilation.
 pub fn desugar_lambda<'ctx>(ctx: &'ctx TypeContext, expr: &'ctx Expr<'ctx>) -> &'ctx Expr<'ctx> {
@@ -16,10 +17,7 @@ pub fn desugar_lambda<'ctx>(ctx: &'ctx TypeContext, expr: &'ctx Expr<'ctx>) -> &
         }
         Expr::App(f, args) => {
             let new_f = desugar_lambda(ctx, f);
-            let mut new_args = Vec::new();
-            for a in *args {
-                new_args.push(desugar_lambda(ctx, a));
-            }
+            let new_args: Vec<_> = args.iter().map(|a| desugar_lambda(ctx, a)).collect();
             let new_args_slice = ctx.alloc_slice_clone(&new_args);
             &*ctx.alloc(Expr::App(new_f, new_args_slice))
         }
@@ -35,17 +33,14 @@ pub fn desugar_lambda<'ctx>(ctx: &'ctx TypeContext, expr: &'ctx Expr<'ctx>) -> &
             &*ctx.alloc(Expr::If(new_c, new_t, new_e))
         }
         Expr::Tuple(elems) => {
-            let mut new_elems = Vec::new();
-            for e in *elems {
-                new_elems.push(desugar_lambda(ctx, e));
-            }
+            let new_elems: Vec<_> = elems.iter().map(|e| desugar_lambda(ctx, e)).collect();
             &*ctx.alloc(Expr::Tuple(ctx.alloc_slice_clone(&new_elems)))
         }
         Expr::Record(fields) => {
-            let mut new_fields = Vec::new();
-            for (k, v) in *fields {
-                new_fields.push((*k, desugar_lambda(ctx, v)));
-            }
+            let new_fields: Vec<_> = fields
+                .iter()
+                .map(|(k, v)| (*k, desugar_lambda(ctx, v)))
+                .collect();
             &*ctx.alloc(Expr::Record(ctx.alloc_slice_clone(&new_fields)))
         }
         _ => expr,
@@ -57,39 +52,44 @@ fn desugar_tuple_lambda<'ctx>(
     pats: &[Pattern<'ctx>],
     desugared_body: &'ctx Expr<'ctx>,
 ) -> &'ctx Expr<'ctx> {
-    let mut arg_pats = Vec::new();
-    let mut let_bindings = Vec::new(); // (rv_name, arg_name, orig_name)
-
-    for (i, p) in pats.iter().enumerate() {
-        let arg_name: &'ctx str = ctx.arena().alloc_str(&format!(".arg{}", i));
-        arg_pats.push(Pattern::Var(arg_name));
-
-        let tvar_id = ctx.fresh_tvar_id();
-        let rv_name: &'ctx str = ctx.arena().alloc_str(&format!(".t{}.rv{}", tvar_id, i));
-
-        let orig_name = match p {
-            Pattern::Var(v) => *v,
-            _ => "_",
-        };
-        let_bindings.push((rv_name, arg_name, orig_name));
-    }
+    let bindings: Vec<_> = pats
+        .iter()
+        .enumerate()
+        .map(|(i, p)| {
+            let arg_name: &'ctx str = ctx.arena().alloc_str(&format!(".arg{}", i));
+            let tvar_id = ctx.fresh_tvar_id();
+            let rv_name: &'ctx str = ctx.arena().alloc_str(&format!(".t{}.rv{}", tvar_id, i));
+            let orig_name = match p {
+                Pattern::Var(v) => *v,
+                _ => "_",
+            };
+            (rv_name, arg_name, orig_name)
+        })
+        .collect();
 
     // Substitute in body
-    let mut curr_body = desugared_body;
-    for (rv_name, _, orig_name) in &let_bindings {
+    let curr_body = bindings.iter().fold(desugared_body, |acc, (rv_name, _, orig_name)| {
         if *orig_name != "_" {
-            curr_body = subst_var(ctx, curr_body, orig_name, rv_name);
+            subst_var(ctx, acc, orig_name, rv_name)
+        } else {
+            acc
         }
-    }
+    });
 
     // Nest let expressions from inside out
-    for (rv_name, arg_name, _) in let_bindings.into_iter().rev() {
-        let arg_var = &*ctx.alloc(Expr::Var(arg_name));
-        curr_body = &*ctx.alloc(Expr::Let(Pattern::Var(rv_name), arg_var, curr_body));
-    }
+    let final_body = bindings
+        .into_iter()
+        .rev()
+        .fold(curr_body, |acc, (rv_name, arg_name, _)| {
+            let arg_var = &*ctx.alloc(Expr::Var(arg_name));
+            &*ctx.alloc(Expr::Let(Pattern::Var(rv_name), arg_var, acc))
+        });
 
+    let arg_pats: Vec<_> = (0..pats.len())
+        .map(|i| Pattern::Var(ctx.arena().alloc_str(&format!(".arg{}", i))))
+        .collect();
     let arg_pats_slice = ctx.alloc_slice_clone(&arg_pats);
-    &*ctx.alloc(Expr::Fn(Pattern::Tuple(arg_pats_slice), curr_body))
+    &*ctx.alloc(Expr::Fn(Pattern::Tuple(arg_pats_slice), final_body))
 }
 
 fn desugar_var_lambda<'ctx>(
@@ -128,10 +128,10 @@ pub fn subst_var<'ctx>(
         Expr::Var(v) if *v == target => &*ctx.alloc(Expr::Var(replacement)),
         Expr::App(f, args) => {
             let new_f = subst_var(ctx, f, target, replacement);
-            let mut new_args = Vec::new();
-            for a in *args {
-                new_args.push(subst_var(ctx, a, target, replacement));
-            }
+            let new_args: Vec<_> = args
+                .iter()
+                .map(|a| subst_var(ctx, a, target, replacement))
+                .collect();
             let new_args_slice = ctx.alloc_slice_clone(&new_args);
             &*ctx.alloc(Expr::App(new_f, new_args_slice))
         }
@@ -159,17 +159,17 @@ pub fn subst_var<'ctx>(
             &*ctx.alloc(Expr::If(new_c, new_t, new_e))
         }
         Expr::Tuple(elems) => {
-            let mut new_elems = Vec::new();
-            for e in *elems {
-                new_elems.push(subst_var(ctx, e, target, replacement));
-            }
+            let new_elems: Vec<_> = elems
+                .iter()
+                .map(|e| subst_var(ctx, e, target, replacement))
+                .collect();
             &*ctx.alloc(Expr::Tuple(ctx.alloc_slice_clone(&new_elems)))
         }
         Expr::Record(fields) => {
-            let mut new_fields = Vec::new();
-            for (k, v) in *fields {
-                new_fields.push((*k, subst_var(ctx, v, target, replacement)));
-            }
+            let new_fields: Vec<_> = fields
+                .iter()
+                .map(|(k, v)| (*k, subst_var(ctx, v, target, replacement)))
+                .collect();
             &*ctx.alloc(Expr::Record(ctx.alloc_slice_clone(&new_fields)))
         }
         _ => expr,
@@ -184,20 +184,16 @@ fn format_csts_ty<'a>(
     if csts.is_empty() {
         ty_str
     } else {
-        let mut sorted_csts = csts.to_vec();
-        sorted_csts.sort_by(crate::lang::types::compare_constraint);
-        let mut cst_strs = Vec::new();
-        for (name, args) in sorted_csts {
-            let args_str = args
-                .iter()
-                .map(|a| format_mono_no_simpl(a))
-                .collect::<Vec<_>>()
-                .join(" ");
-            let s = format!("{} {}", name, args_str);
-            if !cst_strs.contains(&s) {
-                cst_strs.push(s);
-            }
-        }
+        let cst_strs: Vec<String> = csts
+            .iter()
+            .cloned()
+            .sorted_by(crate::lang::types::compare_constraint)
+            .map(|(name, args)| {
+                let args_str = args.iter().copied().map(format_mono_no_simpl).join(" ");
+                format!("{} {}", name, args_str)
+            })
+            .unique()
+            .collect();
         if cst_strs.len() == 1 {
             format!("{} => {}", cst_strs[0], ty_str)
         } else {
@@ -207,11 +203,9 @@ fn format_csts_ty<'a>(
 }
 
 fn normalize_constraints<'a>(constraints: &mut [(&'static str, Vec<&'a MonoType<'a>>)]) {
-    for (_, args) in constraints.iter_mut() {
-        for arg in args {
-            *arg = arg.chase();
-        }
-    }
+    constraints.iter_mut().for_each(|(_, args)| {
+        args.iter_mut().for_each(|arg| *arg = arg.chase());
+    });
     constraints.sort_by(crate::lang::types::compare_constraint);
 }
 
@@ -219,11 +213,11 @@ fn merge_constraints<'a>(
     target: &mut Vec<(&'static str, Vec<&'a MonoType<'a>>)>,
     source: Vec<(&'static str, Vec<&'a MonoType<'a>>)>,
 ) {
-    for constraint in source {
+    source.into_iter().for_each(|constraint| {
         if !target.contains(&constraint) {
             target.push(constraint);
         }
-    }
+    });
 }
 
 /// Recursively infers types and formats the expression in Hobbes annotated syntax (`showAnnotated`).
@@ -318,14 +312,16 @@ fn show_annotated_internal<'ctx>(
         }
         Expr::App(f, args) => {
             let (f_str, f_ty, mut csts) = show_annotated_internal(ctx, f, type_inf)?;
-            let mut arg_strs = Vec::new();
-            let mut arg_tys = Vec::new();
-            for arg in *args {
-                let (a_str, a_ty, a_csts) = show_annotated_internal(ctx, arg, type_inf)?;
-                arg_strs.push(a_str);
-                arg_tys.push(a_ty);
-                merge_constraints(&mut csts, a_csts);
-            }
+            let (arg_strs, arg_tys): (Vec<_>, Vec<_>) = args
+                .iter()
+                .map(|arg| {
+                    let (a_str, a_ty, a_csts) = show_annotated_internal(ctx, arg, type_inf)?;
+                    merge_constraints(&mut csts, a_csts);
+                    Ok((a_str, a_ty))
+                })
+                .collect::<Result<Vec<_>, String>>()?
+                .into_iter()
+                .unzip();
             let ret_ty = type_inf.fresh_tvar();
             let expected_arg_ty = if arg_tys.len() == 1 {
                 arg_tys[0]
@@ -367,30 +363,26 @@ fn show_annotated_internal<'ctx>(
             Ok((s, body_ty.chase(), csts))
         }
         Expr::Fn(pat, body) => {
-            let mut arg_names = Vec::new();
-            let mut arg_tys = Vec::new();
-
-            match pat {
-                Pattern::Tuple(pats) => {
-                    for p in *pats {
+            let (arg_names, arg_tys): (Vec<_>, Vec<_>) = match pat {
+                Pattern::Tuple(pats) => pats
+                    .iter()
+                    .map(|p| {
                         let n = match p {
                             Pattern::Var(v) => *v,
                             _ => "_",
                         };
                         let tvar = type_inf.fresh_tvar();
                         type_inf.bind(n, tvar);
-                        arg_names.push(n);
-                        arg_tys.push(tvar);
-                    }
-                }
+                        (n, tvar)
+                    })
+                    .unzip(),
                 Pattern::Var(v) => {
                     let tvar = type_inf.fresh_tvar();
                     type_inf.bind(v, tvar);
-                    arg_names.push(*v);
-                    arg_tys.push(tvar);
+                    (vec![*v], vec![tvar])
                 }
                 _ => unimplemented!(),
-            }
+            };
 
             let (body_str, body_ty, mut body_csts) = show_annotated_internal(ctx, body, type_inf)?;
 

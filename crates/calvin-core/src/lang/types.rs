@@ -1,3 +1,4 @@
+use itertools::Itertools;
 use std::cell::Cell;
 
 /// Value Object representing a unique Hindley-Milner type variable identifier.
@@ -112,16 +113,13 @@ pub enum MonoType<'a> {
 impl<'a> MonoType<'a> {
     /// Dereference a type variable to its unified value, if any.
     /// This follows the chain of unifications to find the representative type.
-    pub fn chase(&'a self) -> &'a MonoType<'a> {
-        let mut current = self;
-        while let MonoType::TVar(_, cell) = current {
-            if let Some(next) = cell.get() {
-                current = next;
-            } else {
-                break;
-            }
-        }
-        current
+    pub fn chase<'s>(&'s self) -> &'s MonoType<'a> {
+        std::iter::successors(Some(self), |&ty| match ty {
+            MonoType::TVar(_, cell) => cell.get(),
+            _ => None,
+        })
+        .last()
+        .unwrap()
     }
     pub fn is_primitive(&'a self) -> bool {
         matches!(self.chase(), MonoType::Prim(_))
@@ -211,36 +209,26 @@ impl<'a> MonoType<'a> {
                 b.free_tvars(vars);
             }
             MonoType::Tuple(elems) => {
-                for e in *elems {
-                    e.free_tvars(vars);
-                }
+                elems.iter().for_each(|e| e.free_tvars(vars));
             }
             MonoType::Record(fields, tail) => {
-                for (_, t) in *fields {
-                    t.free_tvars(vars);
-                }
+                fields.iter().for_each(|(_, t)| t.free_tvars(vars));
                 if let Some(r) = tail {
                     r.free_tvars(vars);
                 }
             }
             MonoType::Variant(cases, tail) => {
-                for (_, t) in *cases {
-                    t.free_tvars(vars);
-                }
+                cases.iter().for_each(|(_, t)| t.free_tvars(vars));
                 if let Some(r) = tail {
                     r.free_tvars(vars);
                 }
             }
             MonoType::App(f, args) => {
                 f.free_tvars(vars);
-                for a in *args {
-                    a.free_tvars(vars);
-                }
+                args.iter().for_each(|a| a.free_tvars(vars));
             }
             MonoType::Constraint(_, args, inner) => {
-                for a in *args {
-                    a.free_tvars(vars);
-                }
+                args.iter().for_each(|a| a.free_tvars(vars));
                 inner.free_tvars(vars);
             }
             _ => {}
@@ -281,41 +269,41 @@ impl<'a> MonoType<'a> {
                 b.generalize(ctx, env_vars, mapping),
             )),
             MonoType::Tuple(elems) => {
-                let mut new_elems = Vec::new();
-                for e in *elems {
-                    new_elems.push(e.generalize(ctx, env_vars, mapping));
-                }
+                let new_elems: Vec<_> = elems
+                    .iter()
+                    .map(|e| e.generalize(ctx, env_vars, mapping))
+                    .collect();
                 &*ctx.alloc(MonoType::Tuple(ctx.alloc(new_elems)))
             }
             MonoType::Record(fields, tail) => {
-                let mut new_fields = Vec::new();
-                for (name, e) in *fields {
-                    new_fields.push((*name, e.generalize(ctx, env_vars, mapping)));
-                }
+                let new_fields: Vec<_> = fields
+                    .iter()
+                    .map(|(name, e)| (*name, e.generalize(ctx, env_vars, mapping)))
+                    .collect();
                 let new_tail = tail.map(|t| t.generalize(ctx, env_vars, mapping));
                 &*ctx.alloc(MonoType::Record(ctx.alloc(new_fields), new_tail))
             }
             MonoType::Variant(cases, tail) => {
-                let mut new_cases = Vec::new();
-                for (name, e) in *cases {
-                    new_cases.push((*name, e.generalize(ctx, env_vars, mapping)));
-                }
+                let new_cases: Vec<_> = cases
+                    .iter()
+                    .map(|(name, e)| (*name, e.generalize(ctx, env_vars, mapping)))
+                    .collect();
                 let new_tail = tail.map(|t| t.generalize(ctx, env_vars, mapping));
                 &*ctx.alloc(MonoType::Variant(ctx.alloc(new_cases), new_tail))
             }
             MonoType::App(f, args) => {
                 let f_new = f.generalize(ctx, env_vars, mapping);
-                let mut new_args = Vec::new();
-                for a in *args {
-                    new_args.push(a.generalize(ctx, env_vars, mapping));
-                }
+                let new_args: Vec<_> = args
+                    .iter()
+                    .map(|a| a.generalize(ctx, env_vars, mapping))
+                    .collect();
                 &*ctx.alloc(MonoType::App(f_new, ctx.alloc(new_args)))
             }
             MonoType::Constraint(name, args, inner) => {
-                let mut new_args = Vec::new();
-                for a in *args {
-                    new_args.push(a.generalize(ctx, env_vars, mapping));
-                }
+                let new_args: Vec<_> = args
+                    .iter()
+                    .map(|a| a.generalize(ctx, env_vars, mapping))
+                    .collect();
                 &*ctx.alloc(MonoType::Constraint(
                     name,
                     ctx.alloc(new_args),
@@ -343,41 +331,41 @@ impl<'a> MonoType<'a> {
                 b.instantiate(ctx, fresh),
             )),
             MonoType::Tuple(elems) => {
-                let mut new_elems = Vec::new();
-                for e in *elems {
-                    new_elems.push(e.instantiate(ctx, fresh));
-                }
+                let new_elems: Vec<_> = elems
+                    .iter()
+                    .map(|e| e.instantiate(ctx, fresh))
+                    .collect();
                 &*ctx.alloc(MonoType::Tuple(ctx.alloc(new_elems)))
             }
             MonoType::Record(fields, tail) => {
-                let mut new_fields = Vec::new();
-                for (name, e) in *fields {
-                    new_fields.push((*name, e.instantiate(ctx, fresh)));
-                }
+                let new_fields: Vec<_> = fields
+                    .iter()
+                    .map(|(name, e)| (*name, e.instantiate(ctx, fresh)))
+                    .collect();
                 let new_tail = tail.map(|t| t.instantiate(ctx, fresh));
                 &*ctx.alloc(MonoType::Record(ctx.alloc(new_fields), new_tail))
             }
             MonoType::Variant(cases, tail) => {
-                let mut new_cases = Vec::new();
-                for (name, e) in *cases {
-                    new_cases.push((*name, e.instantiate(ctx, fresh)));
-                }
+                let new_cases: Vec<_> = cases
+                    .iter()
+                    .map(|(name, e)| (*name, e.instantiate(ctx, fresh)))
+                    .collect();
                 let new_tail = tail.map(|t| t.instantiate(ctx, fresh));
                 &*ctx.alloc(MonoType::Variant(ctx.alloc(new_cases), new_tail))
             }
             MonoType::App(f, args) => {
                 let f_new = f.instantiate(ctx, fresh);
-                let mut new_args = Vec::new();
-                for a in *args {
-                    new_args.push(a.instantiate(ctx, fresh));
-                }
+                let new_args: Vec<_> = args
+                    .iter()
+                    .map(|a| a.instantiate(ctx, fresh))
+                    .collect();
                 &*ctx.alloc(MonoType::App(f_new, ctx.alloc(new_args)))
             }
             MonoType::Constraint(name, args, inner) => {
-                let mut new_args = Vec::new();
-                for a in *args {
-                    new_args.push(a.instantiate(ctx, fresh));
-                }
+                let new_args: Vec<_> = args
+                    .iter()
+                    .map(|a| a.instantiate(ctx, fresh))
+                    .collect();
                 &*ctx.alloc(MonoType::Constraint(
                     name,
                     ctx.alloc(new_args),
@@ -424,41 +412,21 @@ impl<'a> MonoType<'a> {
 use std::fmt;
 impl<'a> fmt::Debug for MonoType<'a> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let mut ty = self;
-        while let MonoType::TVar(_, cell) = ty {
-            if let Some(next) = cell.get() {
-                ty = next;
-            } else {
-                break;
-            }
-        }
+        let ty = self.chase();
         match ty {
             MonoType::Prim(p) => write!(f, "{:?}", p),
             MonoType::TVar(id, _) => write!(f, ".t{}", id),
             MonoType::TGen(i) => write!(f, "{}", (b'a' + (*i as u8)) as char),
             MonoType::Fn(a, b) => write!(f, "({:?}) -> {:?}", a, b),
             MonoType::Tuple(elems) => {
-                write!(f, "(")?;
-                for (i, e) in elems.iter().enumerate() {
-                    if i > 0 {
-                        write!(f, " * ")?;
-                    }
-                    write!(f, "{:?}", e)?;
-                }
-                write!(f, ")")
+                write!(f, "({})", elems.iter().map(|e| format!("{:?}", e)).join(" * "))
             }
             MonoType::Constraint(name, args, inner) => {
-                write!(f, "{} ", name)?;
-                for (i, arg) in args.iter().enumerate() {
-                    if i > 0 {
-                        write!(f, " ")?;
-                    }
-                    write!(f, "{:?}", arg)?;
-                }
+                let args_str = args.iter().map(|arg| format!("{:?}", arg)).join(" ");
                 write!(
                     f,
-                    ", packsto (((a) * b) -> c * (a)) exists E.((E * b) -> c * E) => {:?}",
-                    inner
+                    "{} {}, packsto (((a) * b) -> c * (a)) exists E.((E * b) -> c * E) => {:?}",
+                    name, args_str, inner
                 )
             }
             _ => write!(f, "Other"),
@@ -492,15 +460,12 @@ pub fn compare_monotype<'a, 'b>(a: &'a MonoType<'a>, b: &'b MonoType<'b>) -> std
         (MonoType::Fn(a1, r1), MonoType::Fn(a2, r2)) => {
             compare_monotype(a1, a2).then_with(|| compare_monotype(r1, r2))
         }
-        (MonoType::Tuple(t1), MonoType::Tuple(t2)) => {
-            for (e1, e2) in t1.iter().zip(t2.iter()) {
-                let ord = compare_monotype(e1, e2);
-                if ord != std::cmp::Ordering::Equal {
-                    return ord;
-                }
-            }
-            t1.len().cmp(&t2.len())
-        }
+        (MonoType::Tuple(t1), MonoType::Tuple(t2)) => t1
+            .iter()
+            .zip(t2.iter())
+            .map(|(e1, e2)| compare_monotype(e1, e2))
+            .find(|ord| *ord != std::cmp::Ordering::Equal)
+            .unwrap_or_else(|| t1.len().cmp(&t2.len())),
         _ => case_id(a).cmp(&case_id(b)),
     }
 }
@@ -510,15 +475,13 @@ pub fn compare_constraint<'a, 'b>(
     c2: &(&str, Vec<&'b MonoType<'b>>),
 ) -> std::cmp::Ordering {
     match c1.0.cmp(c2.0) {
-        std::cmp::Ordering::Equal => {
-            for (a1, a2) in c1.1.iter().zip(c2.1.iter()) {
-                let ord = compare_monotype(a1, a2);
-                if ord != std::cmp::Ordering::Equal {
-                    return ord;
-                }
-            }
-            c1.1.len().cmp(&c2.1.len())
-        }
+        std::cmp::Ordering::Equal => c1
+            .1
+            .iter()
+            .zip(c2.1.iter())
+            .map(|(a1, a2)| compare_monotype(a1, a2))
+            .find(|ord| *ord != std::cmp::Ordering::Equal)
+            .unwrap_or_else(|| c1.1.len().cmp(&c2.1.len())),
         ord => ord,
     }
 }
@@ -529,39 +492,35 @@ pub fn format_qual_type<'a>(
 ) -> String {
     let mut set = std::collections::HashSet::new();
     ty.free_tvars(&mut set);
-    for (_, cargs) in constraints {
-        for arg in cargs {
-            arg.free_tvars(&mut set);
-        }
-    }
+    constraints.iter().for_each(|(_, cargs)| {
+        cargs.iter().for_each(|arg| arg.free_tvars(&mut set));
+    });
 
     let var_ids: std::collections::BTreeSet<usize> = set.into_iter().collect();
 
-    let mut names = std::collections::HashMap::new();
-    for (idx, id) in var_ids.into_iter().enumerate() {
-        let name = if idx < 26 {
-            ((b'a' + idx as u8) as char).to_string()
-        } else {
-            format!("t{}", idx - 26)
-        };
-        names.insert(id, name);
-    }
+    let names: std::collections::HashMap<usize, String> = var_ids
+        .into_iter()
+        .enumerate()
+        .map(|(idx, id)| {
+            let name = if idx < 26 {
+                ((b'a' + idx as u8) as char).to_string()
+            } else {
+                format!("t{}", idx - 26)
+            };
+            (id, name)
+        })
+        .collect();
 
-    let mut sorted_csts = constraints.to_vec();
-    sorted_csts.sort_by(compare_constraint);
-
-    let mut cst_strs = Vec::new();
-    for (name, cargs) in sorted_csts {
-        let args_str = cargs
-            .iter()
-            .map(|arg| format_mono(arg, &names))
-            .collect::<Vec<_>>()
-            .join(" ");
-        let cst_str = format!("{} {}", name, args_str);
-        if !cst_strs.contains(&cst_str) {
-            cst_strs.push(cst_str);
-        }
-    }
+    let cst_strs: Vec<String> = constraints
+        .iter()
+        .cloned()
+        .sorted_by(compare_constraint)
+        .map(|(name, cargs)| {
+            let args_str = cargs.iter().map(|arg| format_mono(arg, &names)).join(" ");
+            format!("{} {}", name, args_str)
+        })
+        .unique()
+        .collect();
 
     let ty_str = format_mono(ty, &names);
     if cst_strs.is_empty() {
@@ -614,8 +573,8 @@ pub fn format_mono<'a>(
             format!("{} -> {}", a_formatted, b_str)
         }
         MonoType::Tuple(elems) => {
-            let parts: Vec<_> = elems.iter().map(|e| format_mono(e, names)).collect();
-            format!("({})", parts.join(" * "))
+            let parts = elems.iter().map(|e| format_mono(e, names)).join(" * ");
+            format!("({})", parts)
         }
         MonoType::Array(inner) => format!("[{}]", format_mono(inner, names)),
         MonoType::FixedArray(inner, len) => format!("[:{}|{}:]", format_mono(inner, names), len),
@@ -623,19 +582,19 @@ pub fn format_mono<'a>(
             if fields.is_empty() {
                 "{}".to_string()
             } else {
-                let parts: Vec<_> = fields
+                let parts = fields
                     .iter()
                     .map(|(n, t)| format!("{}:{}", n, format_mono(t, names)))
-                    .collect();
-                format!("{{ {} }}", parts.join(", "))
+                    .join(", ");
+                format!("{{ {} }}", parts)
             }
         }
         MonoType::Variant(cases, _) => {
-            let parts: Vec<_> = cases
+            let parts = cases
                 .iter()
                 .map(|(n, t)| format!("{}:{}", n, format_mono(t, names)))
-                .collect();
-            format!("|{}|", parts.join(", "))
+                .join(", ");
+            format!("|{}|", parts)
         }
         MonoType::Constraint(_, _, inner) => format_mono(inner, names),
         _ => "unknown".to_string(),
@@ -646,29 +605,22 @@ pub fn format_qual_type_no_simpl<'a>(
     ty: &'a MonoType<'a>,
     constraints: &[(&'a str, Vec<&'a MonoType<'a>>)],
 ) -> String {
-    let mut sorted_csts = constraints.to_vec();
-    sorted_csts.sort_by(compare_constraint);
-
-    let mut cst_strs = Vec::new();
-    for (name, cargs) in sorted_csts {
-        let args_str = cargs
-            .iter()
-            .map(|arg| format_mono_no_simpl(arg))
-            .collect::<Vec<_>>()
-            .join(" ");
-        let cst_str = format!("{} {}", name, args_str);
-        if !cst_strs.contains(&cst_str) {
-            cst_strs.push(cst_str);
-        }
-    }
+    let cst_strs: Vec<String> = constraints
+        .iter()
+        .cloned()
+        .sorted_by(compare_constraint)
+        .map(|(name, cargs)| {
+            let args_str = cargs.iter().copied().map(format_mono_no_simpl).join(" ");
+            format!("{} {}", name, args_str)
+        })
+        .unique()
+        .collect();
 
     let ty_str = format_mono_no_simpl(ty);
-    if cst_strs.is_empty() {
-        ty_str
-    } else if cst_strs.len() == 1 {
-        format!("{} => {}", cst_strs[0], ty_str)
-    } else {
-        format!("({}) => {}", cst_strs.join(", "), ty_str)
+    match cst_strs.len() {
+        0 => ty_str,
+        1 => format!("{} => {}", cst_strs[0], ty_str),
+        _ => format!("({}) => {}", cst_strs.join(", "), ty_str),
     }
 }
 

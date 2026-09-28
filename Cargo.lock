@@ -175,6 +175,7 @@ version = "0.1.0"
 dependencies = [
  "calvin-core",
  "calvin-parse",
+ "itertools 0.13.0",
 ]
 
 [[package]]
@@ -187,6 +188,7 @@ dependencies = [
  "cranelift-jit",
  "cranelift-module",
  "cranelift-native",
+ "itertools 0.13.0",
 ]
 
 [[package]]
@@ -195,6 +197,7 @@ version = "0.1.0"
 dependencies = [
  "calvin-core",
  "inkwell",
+ "itertools 0.13.0",
 ]
 
 [[package]]
@@ -204,6 +207,7 @@ dependencies = [
  "bumpalo",
  "calvin-parse",
  "cbindgen",
+ "itertools 0.13.0",
 ]
 
 [[package]]
@@ -237,6 +241,7 @@ dependencies = [
  "ariadne",
  "calvin-core",
  "chumsky",
+ "itertools 0.13.0",
  "logos",
 ]
 
@@ -855,6 +860,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "itertools"
+version = "0.13.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "413ee7dfc52ee1a4949ceeb7dbc8a33f2d6c088194d9f922fb8318faf1f01186"
+dependencies = [
+ "either",
+]
+
+[[package]]
 name = "itoa"
 version = "1.0.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1119,7 +1133,7 @@ dependencies = [
  "chrono",
  "crossterm",
  "fd-lock",
- "itertools",
+ "itertools 0.12.1",
  "nu-ansi-term",
  "serde",
  "strip-ansi-escapes",

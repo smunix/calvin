@@ -1,4 +1,5 @@
 use crate::lang::types::{MonoType, Prim};
+use itertools::Itertools;
 
 /// Value Object representing a raw untyped 64-bit runtime value produced by JIT execution.
 /// In Calvin and Hobbes, JIT function return values and record/tuple slots are represented as 64-bit words,
@@ -98,14 +99,17 @@ pub unsafe fn format_runtime_value<'a>(raw: u64, ty: &'a MonoType<'a>) -> String
             if ptr.is_null() {
                 return "{}".to_string();
             }
-            let mut parts = Vec::new();
-            for (i, (name, field_ty)) in fields.iter().enumerate() {
-                let slot = ptr.add(i * 8);
-                let val_raw = *(slot as *const u64);
-                let val_str = format_runtime_value(val_raw, field_ty);
-                parts.push(format!("{}={}", name, val_str));
-            }
-            format!("{{{}}}", parts.join(", "))
+            let formatted = fields
+                .iter()
+                .enumerate()
+                .map(|(i, (name, field_ty))| {
+                    let slot = ptr.add(i * 8);
+                    let val_raw = *(slot as *const u64);
+                    let val_str = format_runtime_value(val_raw, field_ty);
+                    format!("{}={}", name, val_str)
+                })
+                .join(", ");
+            format!("{{{}}}", formatted)
         }
         MonoType::Tuple(elems) => {
             if elems.is_empty() {
@@ -115,13 +119,16 @@ pub unsafe fn format_runtime_value<'a>(raw: u64, ty: &'a MonoType<'a>) -> String
             if ptr.is_null() {
                 return "()".to_string();
             }
-            let mut parts = Vec::new();
-            for (i, elem_ty) in elems.iter().enumerate() {
-                let slot = ptr.add(i * 8);
-                let val_raw = *(slot as *const u64);
-                parts.push(format_runtime_value(val_raw, elem_ty));
-            }
-            format!("({})", parts.join(", "))
+            let formatted = elems
+                .iter()
+                .enumerate()
+                .map(|(i, elem_ty)| {
+                    let slot = ptr.add(i * 8);
+                    let val_raw = *(slot as *const u64);
+                    format_runtime_value(val_raw, elem_ty)
+                })
+                .join(", ");
+            format!("({})", formatted)
         }
         MonoType::Variant(cases, _) => {
             let ptr = raw as *const u8;
@@ -153,13 +160,14 @@ pub unsafe fn format_runtime_value<'a>(raw: u64, ty: &'a MonoType<'a>) -> String
             if ptr.is_null() || *len == 0 {
                 return "[]".to_string();
             }
-            let mut parts = Vec::new();
-            for i in 0..*len {
-                let slot = ptr.add(i * 8);
-                let val_raw = *(slot as *const u64);
-                parts.push(format_runtime_value(val_raw, elem_ty));
-            }
-            format!("[{}]", parts.join(", "))
+            let formatted = (0..*len)
+                .map(|i| {
+                    let slot = ptr.add(i * 8);
+                    let val_raw = *(slot as *const u64);
+                    format_runtime_value(val_raw, elem_ty)
+                })
+                .join(", ");
+            format!("[{}]", formatted)
         }
         MonoType::Fn(_, _) => "<closure>".to_string(),
         MonoType::Constraint(_, _, inner) => format_runtime_value(raw, inner),

@@ -1,3 +1,4 @@
+use itertools::Itertools;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
@@ -55,9 +56,7 @@ impl<'a> TypeEnv<'a> {
     }
 
     pub fn free_tvars(&self, vars: &mut HashSet<usize>) {
-        for ty in self.bindings.values() {
-            ty.free_tvars(vars);
-        }
+        self.bindings.values().for_each(|ty| ty.free_tvars(vars));
         if let Some(ref p) = self.parent {
             p.free_tvars(vars);
         }
@@ -114,13 +113,13 @@ fn is_ground_arithmetic_satisfied<'a>(name: &str, args: &[&'a MonoType<'a>]) -> 
 impl<'a> TypeInference<'a> {
     pub fn solve_constraints(&self) -> Result<(), TypeError> {
         let constraints = self.constraints.borrow().clone();
-        for constraint in constraints {
+        constraints.iter().try_for_each(|constraint| {
             if let MonoType::Constraint(name, args, _) = constraint.chase() {
                 // 1. First consult registry functional dependencies
                 let unifications = self.classes.refine_fundeps(name, args);
-                for (target, resolved) in unifications {
-                    self.unify(target, resolved)?;
-                }
+                unifications
+                    .into_iter()
+                    .try_for_each(|(target, resolved)| self.unify(target, resolved))?;
 
                 // 2. Fallback built-in arithmetic solver across primitives
                 if is_arithmetic_op(name) && args.len() == 3 {
@@ -135,37 +134,36 @@ impl<'a> TypeInference<'a> {
                     }
                 }
             }
-        }
+            Ok(())
+        })?;
 
-        for constraint in self.constraints.borrow().iter() {
+        self.constraints.borrow().iter().try_for_each(|constraint| {
             if let MonoType::Constraint(name, args, _) = constraint.chase() {
-                if self.classes.is_satisfied(name, args)
-                    || is_ground_arithmetic_satisfied(name, args)
+                if !self.classes.is_satisfied(name, args)
+                    && !is_ground_arithmetic_satisfied(name, args)
                 {
-                    continue;
-                }
-
-                if let Some(explanation) = self.check_unsatisfiable(name, args) {
-                    let arg_strs: Vec<String> = args
-                        .iter()
-                        .map(|arg| {
-                            let chased = arg.chase();
-                            if crate::lang::typeclass::has_free_tvars(chased) {
-                                "a".to_string()
-                            } else {
-                                crate::lang::types::format_mono_no_simpl(chased)
-                            }
-                        })
-                        .collect();
-                    return Err(TypeError::UnsatisfiableConstraint {
-                        class_name: name.to_string(),
-                        args: arg_strs,
-                        explanation,
-                    });
+                    if let Some(explanation) = self.check_unsatisfiable(name, args) {
+                        let arg_strs: Vec<String> = args
+                            .iter()
+                            .map(|arg| {
+                                let chased = arg.chase();
+                                if crate::lang::typeclass::has_free_tvars(chased) {
+                                    "a".to_string()
+                                } else {
+                                    crate::lang::types::format_mono_no_simpl(chased)
+                                }
+                            })
+                            .collect();
+                        return Err(TypeError::UnsatisfiableConstraint {
+                            class_name: name.to_string(),
+                            args: arg_strs,
+                            explanation,
+                        });
+                    }
                 }
             }
-        }
-        Ok(())
+            Ok(())
+        })
     }
 
     fn check_unsatisfiable(&self, name: &str, args: &[&'a MonoType<'a>]) -> Option<Option<String>> {
@@ -188,28 +186,24 @@ impl<'a> TypeInference<'a> {
     }
 
     pub fn residual_constraints(&self) -> Vec<(&'a str, Vec<&'a MonoType<'a>>)> {
-        let mut residuals = Vec::new();
-        let constraints = self.constraints.borrow().clone();
-        for constraint in constraints {
-            if let MonoType::Constraint(name, args, _) = constraint.chase() {
-                if self.classes.is_satisfied(name, args)
-                    || is_ground_arithmetic_satisfied(name, args)
-                {
-                    continue;
+        self.constraints
+            .borrow()
+            .iter()
+            .filter_map(|constraint| {
+                if let MonoType::Constraint(name, args, _) = constraint.chase() {
+                    if !self.classes.is_satisfied(name, args)
+                        && !is_ground_arithmetic_satisfied(name, args)
+                    {
+                        let chased_args: Vec<&'a MonoType<'a>> =
+                            args.iter().map(|arg| arg.chase()).collect();
+                        return Some((*name, chased_args));
+                    }
                 }
-                let chased_args: Vec<&'a MonoType<'a>> =
-                    args.iter().map(|arg| arg.chase()).collect();
-                residuals.push((*name, chased_args));
-            }
-        }
-        residuals.sort_by(crate::lang::types::compare_constraint);
-        let mut deduped: Vec<(&'a str, Vec<&'a MonoType<'a>>)> = Vec::new();
-        for r in residuals {
-            if !deduped.iter().any(|(n, a)| *n == r.0 && a == &r.1) {
-                deduped.push(r);
-            }
-        }
-        deduped
+                None
+            })
+            .sorted_by(crate::lang::types::compare_constraint)
+            .dedup_by(|a, b| a.0 == b.0 && a.1 == b.1)
+            .collect()
     }
 
     pub fn bind(&mut self, name: &str, ty: &'a MonoType<'a>) {
@@ -255,24 +249,27 @@ impl<'a> TypeInference<'a> {
     pub fn peel_constraints(
         ty: &'a MonoType<'a>,
     ) -> (Vec<(&'a str, &'a [&'a MonoType<'a>])>, &'a MonoType<'a>) {
-        let mut constraints = Vec::new();
         let mut curr = ty.chase();
-        while let MonoType::Constraint(name, args, inner) = curr {
-            constraints.push((*name, *args));
-            curr = inner.chase();
-        }
+        let constraints = std::iter::from_fn(|| {
+            if let MonoType::Constraint(name, args, inner) = curr {
+                curr = inner.chase();
+                Some((*name, *args))
+            } else {
+                None
+            }
+        })
+        .collect();
         (constraints, curr)
     }
 
     pub fn wrap_constraints(
         &self,
         constraints: Vec<(&'a str, &'a [&'a MonoType<'a>])>,
-        mut ty: &'a MonoType<'a>,
+        ty: &'a MonoType<'a>,
     ) -> &'a MonoType<'a> {
-        for (name, args) in constraints.into_iter().rev() {
-            ty = self.ctx.alloc(MonoType::Constraint(name, args, ty));
-        }
-        ty
+        constraints.into_iter().rev().fold(ty, |acc, (name, args)| {
+            &*self.ctx.alloc(MonoType::Constraint(name, args, acc))
+        })
     }
 
     fn occurs(tvar_id: usize, ty: &'a MonoType<'a>) -> bool {
@@ -343,10 +340,7 @@ impl<'a> TypeInference<'a> {
                 if ts1.len() != ts2.len() {
                     return Err(TypeError::TypeMismatch);
                 }
-                for (a, b) in ts1.iter().zip(ts2.iter()) {
-                    self.unify(a, b)?;
-                }
-                Ok(())
+                ts1.iter().zip(ts2.iter()).try_for_each(|(a, b)| self.unify(a, b))
             }
             (MonoType::Record(fs1, tail1), MonoType::Record(fs2, tail2)) => {
                 self.unify_rows(RowKind::Record, fs1, *tail1, fs2, *tail2)
@@ -366,31 +360,26 @@ impl<'a> TypeInference<'a> {
         fs2: &'a [(&'a str, &'a MonoType<'a>)],
         tail2: Option<&'a MonoType<'a>>,
     ) -> Result<(), TypeError> {
-        let mut map1 = std::collections::HashMap::new();
-        for (n, t) in fs1 {
-            map1.insert(*n, *t);
-        }
-        let mut map2 = std::collections::HashMap::new();
-        for (n, t) in fs2 {
-            map2.insert(*n, *t);
-        }
+        let map1: std::collections::HashMap<&'a str, &'a MonoType<'a>> =
+            fs1.iter().copied().collect();
+        let mut map2: std::collections::HashMap<&'a str, &'a MonoType<'a>> =
+            fs2.iter().copied().collect();
 
         let mut diff1 = Vec::new();
-        let mut diff2 = Vec::new();
-
-        for (n, t1_f) in fs1 {
+        fs1.iter().try_for_each(|(n, t1_f)| {
             if let Some(t2_f) = map2.remove(n) {
-                self.unify(t1_f, t2_f)?;
+                self.unify(t1_f, t2_f)
             } else {
                 diff1.push((*n, *t1_f));
+                Ok(())
             }
-        }
+        })?;
 
-        for (n, t2_f) in fs2 {
-            if !map1.contains_key(n) {
-                diff2.push((*n, *t2_f));
-            }
-        }
+        let diff2: Vec<_> = fs2
+            .iter()
+            .copied()
+            .filter(|(n, _)| !map1.contains_key(n))
+            .collect();
 
         if diff1.is_empty() && diff2.is_empty() {
             if let (Some(r1), Some(r2)) = (tail1, tail2) {
@@ -451,10 +440,9 @@ impl<'a> TypeInference<'a> {
         f: impl FnOnce(&mut Self) -> R,
     ) -> R {
         let prev_env = self.env.clone();
-        let mut new_env = prev_env.clone();
-        for (name, ty) in bindings {
-            new_env = Rc::new(TypeEnv::extend(new_env, name, ty));
-        }
+        let new_env = bindings.into_iter().fold(prev_env.clone(), |acc, (name, ty)| {
+            Rc::new(TypeEnv::extend(acc, name, ty))
+        });
         self.env = new_env;
         let result = f(self);
         self.env = prev_env;
@@ -493,31 +481,29 @@ impl<'a> TypeInference<'a> {
                 self.unify(expected_ty, &*self.ctx.alloc(MonoType::Prim(lit_ty)))
             }
             Pattern::Tuple(pats) => {
-                let mut elem_tys = Vec::new();
-                for _ in 0..pats.len() {
-                    elem_tys.push(self.fresh_tvar());
-                }
+                let elem_tys: Vec<_> = (0..pats.len()).map(|_| self.fresh_tvar()).collect();
                 let tup_ty = &*self.ctx.alloc(MonoType::Tuple(
                     self.ctx.arena().alloc_slice_clone(&elem_tys),
                 ));
                 self.unify(expected_ty, tup_ty)?;
-                for (i, p) in pats.iter().enumerate() {
-                    self.visit_pattern(p, elem_tys[i], bindings)?;
-                }
-                Ok(())
+                pats.iter()
+                    .zip(elem_tys.iter())
+                    .try_for_each(|(p, elem_ty)| self.visit_pattern(p, elem_ty, bindings))
             }
             Pattern::Record(fields) => {
-                let mut field_tys = Vec::new();
-                for (name, p) in *fields {
-                    let f_ty = self.fresh_tvar();
-                    field_tys.push((*name, f_ty));
-                    self.visit_pattern(p, f_ty, bindings)?;
-                }
+                let field_tys: Vec<_> = fields
+                    .iter()
+                    .map(|(name, _)| (*name, self.fresh_tvar()))
+                    .collect();
                 let rec_ty = &*self.ctx.alloc(MonoType::Record(
                     self.ctx.arena().alloc_slice_clone(&field_tys),
                     None,
                 ));
-                self.unify(expected_ty, rec_ty)
+                self.unify(expected_ty, rec_ty)?;
+                fields
+                    .iter()
+                    .zip(field_tys.iter())
+                    .try_for_each(|((_, p), (_, f_ty))| self.visit_pattern(p, f_ty, bindings))
             }
             Pattern::Variant(tag, payload) => {
                 let payload_ty = self.fresh_tvar();
@@ -566,19 +552,23 @@ impl<'a> TypeInference<'a> {
 
         // If multiple arguments matching tuple domain length:
         if elem_tys.len() == args.len() && args.len() > 1 {
-            for (arg, param_ty) in args.iter().zip(elem_tys.iter()) {
-                let arg_ty = self.visit(arg)?;
-                self.unify(arg_ty, param_ty)?;
-            }
+            args.iter()
+                .zip(elem_tys.iter())
+                .try_for_each(|(arg, param_ty)| {
+                    let arg_ty = self.visit(arg)?;
+                    self.unify(arg_ty, param_ty)
+                })?;
             return Ok(self.wrap_constraints(constraints, ret));
         }
 
         // If multiple arguments passed, but fewer than tuple domain length (partial application):
         if args.len() > 1 && args.len() < elem_tys.len() {
-            for (arg, param_ty) in args.iter().zip(elem_tys.iter()) {
-                let arg_ty = self.visit(arg)?;
-                self.unify(arg_ty, param_ty)?;
-            }
+            args.iter()
+                .zip(elem_tys.iter())
+                .try_for_each(|(arg, param_ty)| {
+                    let arg_ty = self.visit(arg)?;
+                    self.unify(arg_ty, param_ty)
+                })?;
             let rem_tys = &elem_tys[args.len()..];
             let rem_dom = if rem_tys.len() == 1 {
                 rem_tys[0]
@@ -592,19 +582,23 @@ impl<'a> TypeInference<'a> {
         }
 
         // If more arguments passed than tuple domain length:
-        for (arg, param_ty) in args[..elem_tys.len()].iter().zip(elem_tys.iter()) {
-            let arg_ty = self.visit(arg)?;
-            self.unify(arg_ty, param_ty)?;
-        }
-        let mut curr_ty = self.wrap_constraints(constraints, ret);
-        for arg in &args[elem_tys.len()..] {
-            let ret_ty = self.fresh_tvar();
-            let arg_ty = self.visit(arg)?;
-            let expected_f_ty = &*self.ctx.alloc(MonoType::Fn(arg_ty, ret_ty));
-            self.unify(curr_ty, expected_f_ty)?;
-            curr_ty = ret_ty;
-        }
-        Ok(curr_ty)
+        args[..elem_tys.len()]
+            .iter()
+            .zip(elem_tys.iter())
+            .try_for_each(|(arg, param_ty)| {
+                let arg_ty = self.visit(arg)?;
+                self.unify(arg_ty, param_ty)
+            })?;
+        let init_ty = self.wrap_constraints(constraints, ret);
+        args[elem_tys.len()..]
+            .iter()
+            .try_fold(init_ty, |curr_ty, arg| {
+                let ret_ty = self.fresh_tvar();
+                let arg_ty = self.visit(arg)?;
+                let expected_f_ty = &*self.ctx.alloc(MonoType::Fn(arg_ty, ret_ty));
+                self.unify(curr_ty, expected_f_ty)?;
+                Ok(ret_ty)
+            })
     }
 
     fn try_apply_curried_to_tuple(
@@ -616,19 +610,23 @@ impl<'a> TypeInference<'a> {
         let arg_ty = self.visit(arg_expr)?;
         if let MonoType::Tuple(tup_elems) = arg_ty.chase() {
             if tup_elems.len() > 1 {
-                let mut curried_params: Vec<&'a MonoType<'a>> = Vec::new();
                 let mut cur = inner_ty;
-                while let MonoType::Fn(param, next) = cur {
-                    curried_params.push(*param);
-                    cur = next.chase();
-                    if curried_params.len() == tup_elems.len() {
-                        break;
+                let curried_params = std::iter::from_fn(|| {
+                    if let MonoType::Fn(param, next) = cur {
+                        cur = next.chase();
+                        Some(*param)
+                    } else {
+                        None
                     }
-                }
+                })
+                .take(tup_elems.len())
+                .collect_vec();
+
                 if curried_params.len() == tup_elems.len() {
-                    for (elem, param) in tup_elems.iter().zip(curried_params) {
-                        self.unify(elem, param)?;
-                    }
+                    tup_elems
+                        .iter()
+                        .zip(curried_params.iter())
+                        .try_for_each(|(elem, param)| self.unify(elem, param))?;
                     return Ok(Some(self.wrap_constraints(constraints.to_vec(), cur)));
                 }
             }
@@ -659,10 +657,7 @@ impl<'a> ExprVisitor<'a, Result<&'a MonoType<'a>, TypeError>> for TypeInference<
         if let Some(ty) = self.env.lookup(name) {
             let max_tgen = ty.max_tgen();
             if let Some(m) = max_tgen {
-                let mut fresh_vars = Vec::new();
-                for _ in 0..=m {
-                    fresh_vars.push(self.fresh_tvar());
-                }
+                let fresh_vars: Vec<_> = (0..=m).map(|_| self.fresh_tvar()).collect();
                 let fresh = self.ctx.arena().alloc_slice_clone(&fresh_vars);
                 let inst = ty.instantiate(self.ctx, fresh);
                 if let MonoType::Constraint(_, _, _) = inst {
@@ -737,15 +732,13 @@ impl<'a> ExprVisitor<'a, Result<&'a MonoType<'a>, TypeError>> for TypeInference<
             }
         }
 
-        let mut curr_ty = curr_f_ty;
-        for arg in args {
+        args.iter().try_fold(curr_f_ty, |curr_ty, arg| {
             let ret_ty = self.fresh_tvar();
             let arg_ty = self.visit(arg)?;
             let expected_f_ty = &*self.ctx.alloc(MonoType::Fn(arg_ty, ret_ty));
             self.unify(curr_ty, expected_f_ty)?;
-            curr_ty = ret_ty;
-        }
-        Ok(curr_ty)
+            Ok(ret_ty)
+        })
     }
 
     fn visit_if(
@@ -766,10 +759,10 @@ impl<'a> ExprVisitor<'a, Result<&'a MonoType<'a>, TypeError>> for TypeInference<
     }
 
     fn visit_tuple(&mut self, exprs: &'a [&'a Expr<'a>]) -> Result<&'a MonoType<'a>, TypeError> {
-        let mut tys = Vec::new();
-        for e in exprs {
-            tys.push(self.visit(e)?);
-        }
+        let tys: Vec<_> = exprs
+            .iter()
+            .map(|e| self.visit(e))
+            .collect::<Result<_, _>>()?;
         Ok(&*self
             .ctx
             .alloc(MonoType::Tuple(self.ctx.arena().alloc_slice_clone(&tys))))
@@ -779,10 +772,10 @@ impl<'a> ExprVisitor<'a, Result<&'a MonoType<'a>, TypeError>> for TypeInference<
         &mut self,
         fields: &'a [(&'a str, &'a Expr<'a>)],
     ) -> Result<&'a MonoType<'a>, TypeError> {
-        let mut f_tys = Vec::new();
-        for (name, expr) in fields {
-            f_tys.push((*name, self.visit(expr)?));
-        }
+        let f_tys: Vec<_> = fields
+            .iter()
+            .map(|(name, expr)| Ok((*name, self.visit(expr)?)))
+            .collect::<Result<_, _>>()?;
         Ok(&*self.ctx.alloc(MonoType::Record(
             self.ctx.arena().alloc_slice_clone(&f_tys),
             None,
@@ -817,23 +810,23 @@ impl<'a> ExprVisitor<'a, Result<&'a MonoType<'a>, TypeError>> for TypeInference<
         let scrutinee_ty = self.visit(expr)?;
         let ret_ty = self.fresh_tvar();
 
-        for (pat, body) in branches {
+        branches.iter().try_for_each(|(pat, body)| {
             let mut bindings = Vec::new();
             self.visit_pattern(pat, scrutinee_ty, &mut bindings)?;
 
             let branch_ty = self.with_bindings(bindings, |this| this.visit(body))?;
-            self.unify(ret_ty, branch_ty)?;
-        }
+            self.unify(ret_ty, branch_ty)
+        })?;
 
         Ok(ret_ty)
     }
 
     fn visit_array(&mut self, exprs: &'a [&'a Expr<'a>]) -> Result<&'a MonoType<'a>, TypeError> {
         let elem_ty = self.fresh_tvar();
-        for e in exprs {
+        exprs.iter().try_for_each(|e| {
             let ty = self.visit(e)?;
-            self.unify(elem_ty, ty)?;
-        }
+            self.unify(elem_ty, ty)
+        })?;
         Ok(&*self.ctx.alloc(MonoType::Array(elem_ty)))
     }
 

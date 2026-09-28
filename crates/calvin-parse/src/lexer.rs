@@ -226,18 +226,16 @@ mod tests {
         let amapping = include_str!("../../calvin-boot/boot/amapping.hob");
         let convert = include_str!("../../calvin-boot/boot/convert.hob");
 
-        let lex1: Vec<_> = Token::lexer(amapping).spanned().collect();
-        for (res, span) in lex1 {
+        Token::lexer(amapping).spanned().for_each(|(res, span)| {
             if let Err(e) = res {
                 panic!("Lex error in amapping.hob at {:?}: {:?}", span, e);
             }
-        }
+        });
 
-        let lex2: Vec<_> = Token::lexer(convert).spanned().collect();
-        for (res, span) in lex2 {
+        Token::lexer(convert).spanned().for_each(|(res, span)| {
             if let Err(e) = res {
                 panic!("Lex error in convert.hob at {:?}: {:?}", span, e);
             }
-        }
+        });
     }
 }

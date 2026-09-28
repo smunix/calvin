@@ -2,6 +2,8 @@ use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+use itertools::Itertools;
+
 use inkwell::builder::Builder;
 use inkwell::context::Context;
 use inkwell::execution_engine::{ExecutionEngine, JitFunction};
@@ -281,7 +283,7 @@ impl<'a, 'ctx, 'ast> LoweringContext<'a, 'ctx, 'ast> {
             .unwrap()
             .into_pointer_value();
 
-        for (i, val) in vals.iter().enumerate() {
+        vals.iter().enumerate().for_each(|(i, val)| {
             let offset_val = self.context.i64_type().const_int(i as u64, false);
             let val_to_store = if val.is_int_value() {
                 let int_val = val.into_int_value();
@@ -302,7 +304,7 @@ impl<'a, 'ctx, 'ast> LoweringContext<'a, 'ctx, 'ast> {
                     .unwrap()
             };
             self.builder.build_store(gep, val_to_store).unwrap();
-        }
+        });
 
         self.builder
             .build_ptr_to_int(ptr, self.context.i64_type(), "ptr2int")
@@ -315,27 +317,31 @@ impl<'a, 'ctx, 'ast> LoweringContext<'a, 'ctx, 'ast> {
         f: &'ast Expr<'ast>,
         args: &'ast [&'ast Expr<'ast>],
     ) -> (&'ast Expr<'ast>, Vec<&'ast Expr<'ast>>) {
-        let mut curr_f = f;
-        let mut all_args = vec![args];
-        while let Expr::App(inner_f, inner_args) = curr_f {
-            all_args.insert(0, inner_args);
-            curr_f = inner_f;
-        }
-
-        let mut flat_args = Vec::new();
-        for arg_group in all_args {
-            for arg in (*arg_group).iter() {
-                flat_args.push(*arg);
+        let (root_f, mut groups) = std::iter::successors(Some(f), |&expr| match expr {
+            Expr::App(inner_f, _) => Some(*inner_f),
+            _ => None,
+        })
+        .fold((f, Vec::new()), |(_, mut acc), expr| match expr {
+            Expr::App(inner_f, inner_args) => {
+                acc.push(*inner_args);
+                (*inner_f, acc)
             }
+            other => (other, acc),
+        });
+
+        groups.reverse();
+        groups.push(args);
+
+        let mut flat_args: Vec<&'ast Expr<'ast>> = groups
+            .into_iter()
+            .flat_map(|group| group.iter().copied())
+            .collect();
+
+        if let [Expr::Tuple(elems)] = flat_args.as_slice() {
+            flat_args = elems.to_vec();
         }
 
-        if flat_args.len() == 1 {
-            if let Expr::Tuple(elems) = flat_args[0] {
-                flat_args = elems.to_vec();
-            }
-        }
-
-        (curr_f, flat_args)
+        (root_f, flat_args)
     }
 
     fn lower_unary_op(&mut self, op: &str, arg: &'ast Expr<'ast>) -> Option<BasicValueEnum<'ctx>> {
@@ -575,81 +581,85 @@ impl<'a, 'ctx, 'ast> LoweringContext<'a, 'ctx, 'ast> {
         }
     }
 
+    fn bind_closure_args(
+        &mut self,
+        closure: &'ast Expr<'ast>,
+        args: &[&'ast Expr<'ast>],
+        old_vars: &mut Vec<(String, Option<BasicValueEnum<'ctx>>)>,
+    ) -> &'ast Expr<'ast> {
+        if args.is_empty() {
+            return closure;
+        }
+        match closure {
+            Expr::Fn(pat, body) => match pat {
+                Pattern::Var(name) => {
+                    let arg_val = self.visit(args[0]);
+                    let old = self.vars.get(*name).copied();
+                    self.vars.insert(name.to_string(), arg_val);
+                    old_vars.push((name.to_string(), old));
+                    self.bind_closure_args(body, &args[1..], old_vars)
+                }
+                Pattern::Tuple(pats) => {
+                    if let Expr::Tuple(elems) = args[0] {
+                        pats.iter().zip(elems.iter()).for_each(|(p, elem)| {
+                            let v = self.visit(elem);
+                            if let Pattern::Var(name) = p {
+                                let old = self.vars.get(*name).copied();
+                                self.vars.insert(name.to_string(), v);
+                                old_vars.push((name.to_string(), old));
+                            }
+                        });
+                        self.bind_closure_args(body, &args[1..], old_vars)
+                    } else if args.len() >= pats.len() {
+                        let (curr_args, rem_args) = args.split_at(pats.len());
+                        pats.iter().zip(curr_args.iter()).for_each(|(p, arg)| {
+                            let v = self.visit(arg);
+                            if let Pattern::Var(name) = p {
+                                let old = self.vars.get(*name).copied();
+                                self.vars.insert(name.to_string(), v);
+                                old_vars.push((name.to_string(), old));
+                            }
+                        });
+                        self.bind_closure_args(body, rem_args, old_vars)
+                    } else {
+                        unimplemented!("Partial application of tuple closure");
+                    }
+                }
+                _ => unimplemented!("Unsupported pattern in closure: {:?}", pat),
+            },
+            _ => unimplemented!(
+                "Full application lowering requires environment packing (too many args)"
+            ),
+        }
+    }
+
     fn lower_closure_call(
         &mut self,
         closure: &'ast Expr<'ast>,
         mut flat_args: Vec<&'ast Expr<'ast>>,
     ) -> BasicValueEnum<'ctx> {
-        let mut current_closure = closure;
         let mut old_vars = Vec::new();
 
-        if flat_args.len() == 1 {
-            if let Expr::Tuple(elems) = flat_args[0] {
-                if matches!(current_closure, Expr::Fn(Pattern::Var(_), _)) {
-                    flat_args = elems.to_vec();
-                }
+        if let [Expr::Tuple(elems)] = flat_args.as_slice() {
+            if matches!(closure, Expr::Fn(Pattern::Var(_), _)) {
+                flat_args = elems.to_vec();
             }
         }
 
-        let mut arg_idx = 0;
-        while arg_idx < flat_args.len() {
-            if let Expr::Fn(pat, body) = current_closure {
-                match pat {
-                    Pattern::Var(name) => {
-                        let arg_val = self.visit(flat_args[arg_idx]);
-                        arg_idx += 1;
-                        let old = self.vars.get(*name).copied();
-                        self.vars.insert(name.to_string(), arg_val);
-                        old_vars.push((name.to_string(), old));
-                        current_closure = body;
-                    }
-                    Pattern::Tuple(pats) => {
-                        let cur_arg = flat_args[arg_idx];
-                        if let Expr::Tuple(elems) = cur_arg {
-                            arg_idx += 1;
-                            for (p, elem) in pats.iter().zip(elems.iter()) {
-                                let v = self.visit(elem);
-                                if let Pattern::Var(name) = p {
-                                    let old = self.vars.get(*name).copied();
-                                    self.vars.insert(name.to_string(), v);
-                                    old_vars.push((name.to_string(), old));
-                                }
-                            }
-                            current_closure = body;
-                        } else if flat_args.len() - arg_idx >= pats.len() {
-                            for p in *pats {
-                                let v = self.visit(flat_args[arg_idx]);
-                                arg_idx += 1;
-                                if let Pattern::Var(name) = p {
-                                    let old = self.vars.get(*name).copied();
-                                    self.vars.insert(name.to_string(), v);
-                                    old_vars.push((name.to_string(), old));
-                                }
-                            }
-                            current_closure = body;
-                        } else {
-                            unimplemented!("Partial application of tuple closure");
-                        }
-                    }
-                    _ => unimplemented!("Unsupported pattern in closure: {:?}", pat),
-                }
-            } else {
-                unimplemented!(
-                    "Full application lowering requires environment packing (too many args)"
-                );
-            }
-        }
-
+        let current_closure = self.bind_closure_args(closure, &flat_args, &mut old_vars);
         let res = self.visit(current_closure);
 
         // Restore environment
-        for (name, old) in old_vars.into_iter().rev() {
-            if let Some(val) = old {
-                self.vars.insert(name, val);
-            } else {
-                self.vars.remove(&name);
+        old_vars.into_iter().rev().for_each(|(name, old)| {
+            match old {
+                Some(val) => {
+                    self.vars.insert(name, val);
+                }
+                None => {
+                    self.vars.remove(&name);
+                }
             }
-        }
+        });
 
         res
     }
@@ -740,13 +750,25 @@ impl<'a, 'ctx, 'ast> ExprVisitor<'ast, BasicValueEnum<'ctx>> for LoweringContext
             }
 
             if let Some(def_expr) = self.fn_defs.get(*op) {
-                curr_f = def_expr;
-                while let Expr::App(inner_f, inner_args) = curr_f {
-                    for arg in (*inner_args).iter().rev() {
-                        flat_args.insert(0, *arg);
+                let (root_f, prepend_args) = std::iter::successors(Some(*def_expr), |&expr| match expr {
+                    Expr::App(inner_f, _) => Some(*inner_f),
+                    _ => None,
+                })
+                .fold((*def_expr, Vec::new()), |(_, mut acc), expr| match expr {
+                    Expr::App(inner_f, inner_args) => {
+                        acc.push(*inner_args);
+                        (*inner_f, acc)
                     }
-                    curr_f = inner_f;
-                }
+                    other => (other, acc),
+                });
+                curr_f = root_f;
+                let mut new_flat = prepend_args
+                    .into_iter()
+                    .rev()
+                    .flat_map(|group| group.iter().copied())
+                    .collect::<Vec<_>>();
+                new_flat.append(&mut flat_args);
+                flat_args = new_flat;
             }
         }
 
@@ -758,7 +780,7 @@ impl<'a, 'ctx, 'ast> ExprVisitor<'ast, BasicValueEnum<'ctx>> for LoweringContext
     }
 
     fn visit_tuple(&mut self, exprs: &'ast [&'ast Expr<'ast>]) -> BasicValueEnum<'ctx> {
-        let vals: Vec<_> = exprs.iter().map(|e| self.visit(e)).collect();
+        let vals = exprs.iter().map(|e| self.visit(e)).collect_vec();
         self.allocate_and_store_elements(&vals)
     }
 
@@ -766,7 +788,7 @@ impl<'a, 'ctx, 'ast> ExprVisitor<'ast, BasicValueEnum<'ctx>> for LoweringContext
         &mut self,
         fields: &'ast [(&'ast str, &'ast Expr<'ast>)],
     ) -> BasicValueEnum<'ctx> {
-        let vals: Vec<_> = fields.iter().map(|(_, e)| self.visit(e)).collect();
+        let vals = fields.iter().map(|(_, e)| self.visit(e)).collect_vec();
         self.allocate_and_store_elements(&vals)
     }
 
@@ -959,24 +981,25 @@ impl<'a, 'ctx, 'ast> ExprVisitor<'ast, BasicValueEnum<'ctx>> for LoweringContext
             .build_unconditional_branch(next_test_bb)
             .unwrap();
 
-        let mut phi_nodes = Vec::new();
+        let phi_nodes = branches
+            .iter()
+            .map(|(pat, body)| {
+                self.builder.position_at_end(next_test_bb);
 
-        for (pat, body) in branches {
-            self.builder.position_at_end(next_test_bb);
+                let match_bb = self.context.append_basic_block(function, "match");
+                let fail_bb = self.context.append_basic_block(function, "fail");
 
-            let match_bb = self.context.append_basic_block(function, "match");
-            let fail_bb = self.context.append_basic_block(function, "fail");
+                self.compile_pattern_check(pat, scrut_val, match_bb, fail_bb);
 
-            self.compile_pattern_check(pat, scrut_val, match_bb, fail_bb);
+                self.builder.position_at_end(match_bb);
+                let body_val = self.visit(body);
+                self.builder.build_unconditional_branch(merge_bb).unwrap();
+                let match_bb_after = self.builder.get_insert_block().unwrap();
 
-            self.builder.position_at_end(match_bb);
-            let body_val = self.visit(body);
-            self.builder.build_unconditional_branch(merge_bb).unwrap();
-            let match_bb_after = self.builder.get_insert_block().unwrap();
-            phi_nodes.push((body_val, match_bb_after));
-
-            next_test_bb = fail_bb;
-        }
+                next_test_bb = fail_bb;
+                (body_val, match_bb_after)
+            })
+            .collect_vec();
 
         self.builder.position_at_end(next_test_bb);
         self.builder.build_unreachable().unwrap();
@@ -986,9 +1009,9 @@ impl<'a, 'ctx, 'ast> ExprVisitor<'ast, BasicValueEnum<'ctx>> for LoweringContext
             .builder
             .build_phi(phi_nodes[0].0.get_type(), "casetmp")
             .unwrap();
-        for (v, bb) in &phi_nodes {
+        phi_nodes.iter().for_each(|(v, bb)| {
             phi.add_incoming(&[(v, *bb)]);
-        }
+        });
 
         phi.as_basic_value()
     }
@@ -1160,10 +1183,9 @@ impl<'a, 'ctx, 'ast> LoweringContext<'a, 'ctx, 'ast> {
                     .get_parent()
                     .unwrap();
 
-                let mut next_blocks = Vec::new();
-                for _ in 0..pats.len() {
-                    next_blocks.push(self.context.append_basic_block(function, "tup_test"));
-                }
+                let next_blocks = (0..pats.len())
+                    .map(|_| self.context.append_basic_block(function, "tup_test"))
+                    .collect_vec();
 
                 self.builder
                     .build_unconditional_branch(next_blocks[0])
@@ -1177,7 +1199,7 @@ impl<'a, 'ctx, 'ast> LoweringContext<'a, 'ctx, 'ast> {
                     )
                     .unwrap();
 
-                for (i, p) in pats.iter().enumerate() {
+                pats.iter().enumerate().for_each(|(i, p)| {
                     self.builder.position_at_end(next_blocks[i]);
 
                     let offset_val = self.context.i64_type().const_int(i as u64, false);
@@ -1198,7 +1220,7 @@ impl<'a, 'ctx, 'ast> LoweringContext<'a, 'ctx, 'ast> {
                     };
 
                     self.compile_pattern_check(p, elem_val, succ_block, fail_bb);
-                }
+                });
             }
             Pattern::Record(fields) => {
                 if fields.is_empty() {
@@ -1213,10 +1235,9 @@ impl<'a, 'ctx, 'ast> LoweringContext<'a, 'ctx, 'ast> {
                     .get_parent()
                     .unwrap();
 
-                let mut next_blocks = Vec::new();
-                for _ in 0..fields.len() {
-                    next_blocks.push(self.context.append_basic_block(function, "rec_test"));
-                }
+                let next_blocks = (0..fields.len())
+                    .map(|_| self.context.append_basic_block(function, "rec_test"))
+                    .collect_vec();
 
                 self.builder
                     .build_unconditional_branch(next_blocks[0])
@@ -1230,7 +1251,7 @@ impl<'a, 'ctx, 'ast> LoweringContext<'a, 'ctx, 'ast> {
                     )
                     .unwrap();
 
-                for (i, (_, p)) in fields.iter().enumerate() {
+                fields.iter().enumerate().for_each(|(i, (_, p))| {
                     self.builder.position_at_end(next_blocks[i]);
 
                     let offset_val = self.context.i64_type().const_int(i as u64, false);
@@ -1251,7 +1272,7 @@ impl<'a, 'ctx, 'ast> LoweringContext<'a, 'ctx, 'ast> {
                     };
 
                     self.compile_pattern_check(p, elem_val, succ_block, fail_bb);
-                }
+                });
             }
             Pattern::Variant(_tag, p) => {
                 let ptr = self
