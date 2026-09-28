@@ -107,9 +107,9 @@ impl<'a> TypeClassRegistry<'a> {
                     if inst.types.len() != args.len() {
                         return false;
                     }
-                    from_indices.iter().all(|&idx| {
-                        types_match(args[idx].chase(), inst.types[idx].chase())
-                    })
+                    from_indices
+                        .iter()
+                        .all(|&idx| types_match(args[idx].chase(), inst.types[idx].chase()))
                 })
                 .collect();
 
@@ -158,8 +158,12 @@ impl<'a> TypeClassRegistry<'a> {
     }
 
     /// Generate a detailed Hobbes-parity explanation when a constraint cannot be satisfied.
-    pub fn explain_unsatisfiable(&self, class_name: &str, args: &[&'a MonoType<'a>]) -> Option<String> {
-        let t1_str = crate::lang::types::format_mono_no_simpl(args.get(0)?.chase());
+    pub fn explain_unsatisfiable(
+        &self,
+        class_name: &str,
+        args: &[&'a MonoType<'a>],
+    ) -> Option<String> {
+        let t1_str = crate::lang::types::format_mono_no_simpl(args.first()?.chase());
         let t2_str = crate::lang::types::format_mono_no_simpl(args.get(1)?.chase());
 
         if class_name == "Convert" {
@@ -168,7 +172,7 @@ impl<'a> TypeClassRegistry<'a> {
                 || matches!(target, MonoType::Tuple(ts) if ts.is_empty())
             {
                 return Some(
-"stdin:86,1-87,15: most likely instance fails at:
+                    "stdin:86,1-87,15: most likely instance fails at:
   !equals () ()
 83 instance Castable a@f a@? where                                                 
 84   cast = unsafeCast                                                             
@@ -178,7 +182,8 @@ impl<'a> TypeClassRegistry<'a> {
 88                                                                                 
 89 class MemIdentical a b where                                                    
 90   micast :: a -> b                                                              
-91".to_string(),
+91"
+                    .to_string(),
                 );
             }
             return None;
@@ -188,57 +193,7 @@ impl<'a> TypeClassRegistry<'a> {
             return None;
         }
 
-        let (line_start, line_end, col_end, snippet) = match class_name {
-            "Add" => (
-                125, 126, 30,
-"122 instance Add datetime time datetime where
-123   x + y = convert((convert(x)::long) + (convert(y)::long)) :: datetime
-124
-125 instance (a != b, Add b b b, Convert a b) => Add a b b where
-126   x + y = (convert(x) :: b) + y
-127
-128 instance (a != b, Add b b b, Convert a b) => Add b a b where
-129   x + y = x + (convert(y) :: b)
-130",
-            ),
-            "Subtract" => (
-                175, 176, 30,
-"172 instance Subtract datetime datetime timespan where
-173   x - y = convert((convert(x)::long) - (convert(y)::long)) :: timespan
-174
-175 instance (a != b, Subtract b b b, Convert a b) => Subtract a b b where
-176   x - y = (convert(x) :: b) - y
-177
-178 instance (a != b, Subtract b b b, Convert a b) => Subtract b a b where
-179   x - y = x - (convert(y) :: b)
-180",
-            ),
-            "Multiply" => (
-                225, 226, 30,
-"222 instance Multiply int int int where
-223   (*) = imul
-224
-225 instance (a != b, Multiply b b b, Convert a b) => Multiply a b b where
-226   x * y = (convert(x) :: b) * y
-227
-228 instance (a != b, Multiply b b b, Convert a b) => Multiply b a b where
-229   x * y = x * (convert(y) :: b)
-230",
-            ),
-            "Divide" => (
-                275, 276, 30,
-"272 instance Divide int int int where
-273   (/) = idiv
-274
-275 instance (a != b, Divide b b b, Convert a b) => Divide a b b where
-276   x / y = (convert(x) :: b) / y
-277
-278 instance (a != b, Divide b b b, Convert a b) => Divide b a b where
-279   x / y = x / (convert(y) :: b)
-280",
-            ),
-            _ => return None,
-        };
+        let (line_start, line_end, col_end, snippet) = arithmetic_diagnostic_template(class_name)?;
 
         let equals_check = format!("!equals {} {}", t1_str, t2_str);
         let class_check = format!("{} {} {} {}", class_name, t1_str, t2_str, t2_str);
@@ -250,20 +205,82 @@ impl<'a> TypeClassRegistry<'a> {
     }
 }
 
+fn arithmetic_diagnostic_template(class_name: &str) -> Option<(usize, usize, usize, &'static str)> {
+    match class_name {
+        "Add" => Some((
+            125,
+            126,
+            30,
+            "122 instance Add datetime time datetime where
+123   x + y = convert((convert(x)::long) + (convert(y)::long)) :: datetime
+124
+125 instance (a != b, Add b b b, Convert a b) => Add a b b where
+126   x + y = (convert(x) :: b) + y
+127
+128 instance (a != b, Add b b b, Convert a b) => Add b a b where
+129   x + y = x + (convert(y) :: b)
+130",
+        )),
+        "Subtract" => Some((
+            175,
+            176,
+            30,
+            "172 instance Subtract datetime datetime timespan where
+173   x - y = convert((convert(x)::long) - (convert(y)::long)) :: timespan
+174
+175 instance (a != b, Subtract b b b, Convert a b) => Subtract a b b where
+176   x - y = (convert(x) :: b) - y
+177
+178 instance (a != b, Subtract b b b, Convert a b) => Subtract b a b where
+179   x - y = x - (convert(y) :: b)
+180",
+        )),
+        "Multiply" => Some((
+            225,
+            226,
+            30,
+            "222 instance Multiply int int int where
+223   (*) = imul
+224
+225 instance (a != b, Multiply b b b, Convert a b) => Multiply a b b where
+226   x * y = (convert(x) :: b) * y
+227
+228 instance (a != b, Multiply b b b, Convert a b) => Multiply b a b where
+229   x * y = x * (convert(y) :: b)
+230",
+        )),
+        "Divide" => Some((
+            275,
+            276,
+            30,
+            "272 instance Divide int int int where
+273   (/) = idiv
+274
+275 instance (a != b, Divide b b b, Convert a b) => Divide a b b where
+276   x / y = (convert(x) :: b) / y
+277
+278 instance (a != b, Divide b b b, Convert a b) => Divide b a b where
+279   x / y = x / (convert(y) :: b)
+280",
+        )),
+        _ => None,
+    }
+}
+
 pub fn has_free_tvars(ty: &MonoType) -> bool {
     match ty {
-        MonoType::TVar(_, cell) => cell.get().map_or(true, |inner| has_free_tvars(inner.chase())),
+        MonoType::TVar(_, cell) => cell.get().is_none_or(|inner| has_free_tvars(inner.chase())),
         MonoType::Array(inner) => has_free_tvars(inner.chase()),
         MonoType::FixedArray(inner, _) => has_free_tvars(inner.chase()),
         MonoType::Fn(a, b) => has_free_tvars(a.chase()) || has_free_tvars(b.chase()),
         MonoType::Tuple(ts) => ts.iter().any(|t| has_free_tvars(t.chase())),
         MonoType::Record(fields, tail) => {
             fields.iter().any(|(_, t)| has_free_tvars(t.chase()))
-                || tail.map_or(false, |t| has_free_tvars(t.chase()))
+                || tail.is_some_and(|t| has_free_tvars(t.chase()))
         }
         MonoType::Variant(cases, tail) => {
             cases.iter().any(|(_, t)| has_free_tvars(t.chase()))
-                || tail.map_or(false, |t| has_free_tvars(t.chase()))
+                || tail.is_some_and(|t| has_free_tvars(t.chase()))
         }
         MonoType::App(f, args) => {
             has_free_tvars(f.chase()) || args.iter().any(|a| has_free_tvars(a.chase()))

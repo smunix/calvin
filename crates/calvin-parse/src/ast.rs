@@ -160,4 +160,3 @@ impl<'a> TypeExpr<'a> {
         matches!(self, TypeExpr::Array(_))
     }
 }
-

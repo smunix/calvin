@@ -115,21 +115,16 @@ impl<'a, 'map> ExprVisitor<'a, &'a Expr<'a>> for UnqualifierPass<'a, 'map> {
     }
 
     fn visit_tuple(&mut self, fields: &'a [&'a Expr<'a>]) -> &'a Expr<'a> {
-        let mut new_fields = Vec::with_capacity(fields.len());
-        for f in fields {
-            new_fields.push(self.visit(f));
-        }
-        let nf_slice = self.ctx.arena().alloc_slice_copy(&new_fields);
-        self.ctx.arena().alloc(Expr::Tuple(nf_slice))
+        let new_fields: Vec<&'a Expr<'a>> = fields.iter().map(|f| self.visit(f)).collect();
+        let slice = self.ctx.arena().alloc_slice_copy(&new_fields);
+        self.ctx.arena().alloc(Expr::Tuple(slice))
     }
 
     fn visit_record(&mut self, fields: &'a [(&'a str, &'a Expr<'a>)]) -> &'a Expr<'a> {
-        let mut new_fields = Vec::with_capacity(fields.len());
-        for (k, v) in fields {
-            new_fields.push((*k, self.visit(v)));
-        }
-        let nf_slice = self.ctx.arena().alloc_slice_copy(&new_fields);
-        self.ctx.arena().alloc(Expr::Record(nf_slice))
+        let new_fields: Vec<(&'a str, &'a Expr<'a>)> =
+            fields.iter().map(|(k, v)| (*k, self.visit(v))).collect();
+        let slice = self.ctx.arena().alloc_slice_copy(&new_fields);
+        self.ctx.arena().alloc(Expr::Record(slice))
     }
 
     fn visit_field_access(&mut self, expr: &'a Expr<'a>, field: &'a str) -> &'a Expr<'a> {
@@ -148,12 +143,12 @@ impl<'a, 'map> ExprVisitor<'a, &'a Expr<'a>> for UnqualifierPass<'a, 'map> {
         branches: &'a [(Pattern<'a>, &'a Expr<'a>)],
     ) -> &'a Expr<'a> {
         let new_expr = self.visit(expr);
-        let mut new_branches = Vec::with_capacity(branches.len());
-        for (p, b) in branches {
-            new_branches.push((p.clone(), self.visit(b)));
-        }
-        let nb_slice = self.ctx.arena().alloc_slice_clone(&new_branches);
-        self.ctx.arena().alloc(Expr::Case(new_expr, nb_slice))
+        let new_branches: Vec<(Pattern<'a>, &'a Expr<'a>)> = branches
+            .iter()
+            .map(|(p, b)| (p.clone(), self.visit(b)))
+            .collect();
+        let slice = self.ctx.arena().alloc_slice_clone(&new_branches);
+        self.ctx.arena().alloc(Expr::Case(new_expr, slice))
     }
 
     fn visit_array_index(&mut self, arr: &'a Expr<'a>, idx: &'a Expr<'a>) -> &'a Expr<'a> {
@@ -168,12 +163,9 @@ impl<'a, 'map> ExprVisitor<'a, &'a Expr<'a>> for UnqualifierPass<'a, 'map> {
     }
 
     fn visit_array(&mut self, exprs: &'a [&'a Expr<'a>]) -> &'a Expr<'a> {
-        let mut new_exprs = Vec::with_capacity(exprs.len());
-        for e in exprs {
-            new_exprs.push(self.visit(e));
-        }
-        let nf_slice = self.ctx.arena().alloc_slice_copy(&new_exprs);
-        self.ctx.arena().alloc(Expr::Array(nf_slice))
+        let new_exprs: Vec<&'a Expr<'a>> = exprs.iter().map(|e| self.visit(e)).collect();
+        let slice = self.ctx.arena().alloc_slice_copy(&new_exprs);
+        self.ctx.arena().alloc(Expr::Array(slice))
     }
 }
 

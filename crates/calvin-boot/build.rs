@@ -12,7 +12,7 @@ fn main() {
     if let Ok(read_dir) = fs::read_dir(boot_dir) {
         for entry in read_dir.flatten() {
             let path = entry.path();
-            if path.extension().map_or(false, |ext| ext == "hob") {
+            if path.extension().is_some_and(|ext| ext == "hob") {
                 if let Some(file_name) = path.file_name().and_then(|s| s.to_str()) {
                     entries.push(file_name.to_string());
                 }

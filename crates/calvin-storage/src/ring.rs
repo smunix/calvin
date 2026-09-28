@@ -199,36 +199,37 @@ impl ShmRing {
 
     pub fn push(&self, bytes: &[u8], qos: QoS) -> bool {
         let header = unsafe { self.header.as_ref() };
-        let cap = header.capacity;
-        let len = bytes.len() as u64;
+        let capacity = header.capacity;
+        let bytes_len = bytes.len() as u64;
 
-        if len > cap {
+        if bytes_len > capacity {
             return false;
         }
 
         loop {
-            let r = header.read_idx.load(Ordering::Acquire);
-            let w = header.write_idx.load(Ordering::Acquire);
+            let read_pos = header.read_idx.load(Ordering::Acquire);
+            let write_pos = header.write_idx.load(Ordering::Acquire);
 
-            let available = cap - (w.wrapping_sub(r));
-            if len <= available {
-                let offset = w % cap;
-                let data_slice =
-                    unsafe { std::slice::from_raw_parts_mut(self.data.as_ptr(), cap as usize) };
+            let available = capacity - write_pos.wrapping_sub(read_pos);
+            if bytes_len <= available {
+                let offset = write_pos % capacity;
+                let data_slice = unsafe {
+                    std::slice::from_raw_parts_mut(self.data.as_ptr(), capacity as usize)
+                };
 
-                let first_part = std::cmp::min(len, cap - offset);
+                let first_part = std::cmp::min(bytes_len, capacity - offset);
                 data_slice[(offset as usize)..((offset + first_part) as usize)]
                     .copy_from_slice(&bytes[..(first_part as usize)]);
 
-                if first_part < len {
-                    let second_part = len - first_part;
+                if first_part < bytes_len {
+                    let second_part = bytes_len - first_part;
                     data_slice[..(second_part as usize)]
                         .copy_from_slice(&bytes[(first_part as usize)..]);
                 }
 
                 header
                     .write_idx
-                    .store(w.wrapping_add(len), Ordering::Release);
+                    .store(write_pos.wrapping_add(bytes_len), Ordering::Release);
                 return true;
             }
 
@@ -241,21 +242,22 @@ impl ShmRing {
 
     pub fn pop(&self, out: &mut [u8]) -> usize {
         let header = unsafe { self.header.as_ref() };
-        let cap = header.capacity;
+        let capacity = header.capacity;
 
-        let r = header.read_idx.load(Ordering::Acquire);
-        let w = header.write_idx.load(Ordering::Acquire);
+        let read_pos = header.read_idx.load(Ordering::Acquire);
+        let write_pos = header.write_idx.load(Ordering::Acquire);
 
-        let available = w.wrapping_sub(r);
+        let available = write_pos.wrapping_sub(read_pos);
         if available == 0 {
             return 0;
         }
 
         let to_read = std::cmp::min(available, out.len() as u64);
-        let offset = r % cap;
-        let data_slice = unsafe { std::slice::from_raw_parts(self.data.as_ptr(), cap as usize) };
+        let offset = read_pos % capacity;
+        let data_slice =
+            unsafe { std::slice::from_raw_parts(self.data.as_ptr(), capacity as usize) };
 
-        let first_part = std::cmp::min(to_read, cap - offset);
+        let first_part = std::cmp::min(to_read, capacity - offset);
         out[..(first_part as usize)]
             .copy_from_slice(&data_slice[(offset as usize)..((offset + first_part) as usize)]);
 
@@ -266,7 +268,7 @@ impl ShmRing {
 
         header
             .read_idx
-            .store(r.wrapping_add(to_read), Ordering::Release);
+            .store(read_pos.wrapping_add(to_read), Ordering::Release);
         to_read as usize
     }
 }

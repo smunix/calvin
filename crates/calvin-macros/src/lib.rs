@@ -39,6 +39,36 @@ pub fn calvin_storage_group(input: TokenStream) -> TokenStream {
     TokenStream::from(expanded)
 }
 
+fn generate_byte_serializers<'a>(
+    args: impl Iterator<Item = &'a Expr>,
+) -> Vec<proc_macro2::TokenStream> {
+    args.map(|arg| {
+        quote! {
+            let bytes = unsafe {
+                std::slice::from_raw_parts(
+                    (&#arg as *const _ as *const u8),
+                    std::mem::size_of_val(&#arg)
+                )
+            };
+            buffer.extend_from_slice(bytes);
+        }
+    })
+    .collect()
+}
+
+fn expand_ring_buffer_push(
+    group: &Expr,
+    serializers: &[proc_macro2::TokenStream],
+) -> proc_macro2::TokenStream {
+    quote! {
+        {
+            let mut buffer = Vec::new();
+            #(#serializers)*
+            #group::get_ring().push(&buffer, calvin_storage::ring::QoS::Unreliable);
+        }
+    }
+}
+
 #[proc_macro]
 pub fn hstore(input: TokenStream) -> TokenStream {
     let args = parse_macro_input!(input as Args).exprs;
@@ -50,27 +80,8 @@ pub fn hstore(input: TokenStream) -> TokenStream {
 
     let args_vec: Vec<_> = args.into_iter().collect();
     let group = &args_vec[0];
-
-    let mut serializers = Vec::new();
-    for arg in args_vec.iter().skip(1) {
-        serializers.push(quote! {
-            let bytes = unsafe {
-                std::slice::from_raw_parts(
-                    (&#arg as *const _ as *const u8),
-                    std::mem::size_of_val(&#arg)
-                )
-            };
-            buffer.extend_from_slice(bytes);
-        });
-    }
-
-    let expanded = quote! {
-        {
-            let mut buffer = Vec::new();
-            #(#serializers)*
-            #group::get_ring().push(&buffer, calvin_storage::ring::QoS::Unreliable);
-        }
-    };
+    let serializers = generate_byte_serializers(args_vec.iter().skip(1));
+    let expanded = expand_ring_buffer_push(group, &serializers);
 
     TokenStream::from(expanded)
 }
@@ -86,27 +97,8 @@ pub fn hlog(input: TokenStream) -> TokenStream {
 
     let args_vec: Vec<_> = args.into_iter().collect();
     let group = &args_vec[0];
-
-    let mut serializers = Vec::new();
-    for arg in args_vec.iter().skip(2) {
-        serializers.push(quote! {
-            let bytes = unsafe {
-                std::slice::from_raw_parts(
-                    (&#arg as *const _ as *const u8),
-                    std::mem::size_of_val(&#arg)
-                )
-            };
-            buffer.extend_from_slice(bytes);
-        });
-    }
-
-    let expanded = quote! {
-        {
-            let mut buffer = Vec::new();
-            #(#serializers)*
-            #group::get_ring().push(&buffer, calvin_storage::ring::QoS::Unreliable);
-        }
-    };
+    let serializers = generate_byte_serializers(args_vec.iter().skip(2));
+    let expanded = expand_ring_buffer_push(group, &serializers);
 
     TokenStream::from(expanded)
 }

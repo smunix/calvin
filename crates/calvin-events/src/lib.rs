@@ -47,4 +47,3 @@ mod domain_tests {
         assert_eq!(server2.port().as_u16(), 9090);
     }
 }
-

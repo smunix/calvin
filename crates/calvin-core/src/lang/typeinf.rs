@@ -78,11 +78,44 @@ pub struct TypeInference<'a> {
     pub constraints: std::cell::RefCell<Vec<&'a MonoType<'a>>>,
 }
 
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+enum RowKind {
+    Record,
+    Variant,
+}
+
+#[inline]
+fn is_arithmetic_op(name: &str) -> bool {
+    matches!(name, "Add" | "Subtract" | "Multiply" | "Divide")
+}
+
+#[inline]
+fn is_arithmetic_prim(prim: Prim) -> bool {
+    matches!(
+        prim,
+        Prim::Int | Prim::Float | Prim::Double | Prim::Long | Prim::Short | Prim::Byte | Prim::Char
+    )
+}
+
+fn is_ground_arithmetic_satisfied<'a>(name: &str, args: &[&'a MonoType<'a>]) -> bool {
+    if args.len() != 3 || !is_arithmetic_op(name) {
+        return false;
+    }
+    match (args[0].chase(), args[1].chase(), args[2].chase()) {
+        (MonoType::Prim(p1), MonoType::Prim(p2), MonoType::Prim(p3)) => {
+            (p1 == p2 && p2 == p3 && is_arithmetic_prim(*p1))
+                || (*p1 == Prim::DateTime && *p2 == Prim::Time && *p3 == Prim::DateTime)
+                || (*p1 == Prim::Time && *p2 == Prim::TimeSpan && *p3 == Prim::Time)
+        }
+        _ => false,
+    }
+}
+
 impl<'a> TypeInference<'a> {
     pub fn solve_constraints(&self) -> Result<(), TypeError> {
         let constraints = self.constraints.borrow().clone();
-        for c in constraints {
-            if let MonoType::Constraint(name, args, _) = c.chase() {
+        for constraint in constraints {
+            if let MonoType::Constraint(name, args, _) = constraint.chase() {
                 // 1. First consult registry functional dependencies
                 let unifications = self.classes.refine_fundeps(name, args);
                 for (target, resolved) in unifications {
@@ -90,89 +123,29 @@ impl<'a> TypeInference<'a> {
                 }
 
                 // 2. Fallback built-in arithmetic solver across primitives
-                if *name == "Add" || *name == "Subtract" || *name == "Multiply" || *name == "Divide" {
-                    if args.len() == 3 {
-                        let a = args[0].chase();
-                        let b = args[1].chase();
-                        let c_arg = args[2].chase();
+                if is_arithmetic_op(name) && args.len() == 3 {
+                    let a = args[0].chase();
+                    let b = args[1].chase();
+                    let result_type = args[2].chase();
 
-                        match (a, b) {
-                            (MonoType::Prim(Prim::Int), MonoType::Prim(Prim::Int)) => {
-                                self.unify(c_arg, &*self.ctx.alloc(MonoType::Prim(Prim::Int)))?;
-                            }
-                            (MonoType::Prim(Prim::Float), MonoType::Prim(Prim::Float)) => {
-                                self.unify(c_arg, &*self.ctx.alloc(MonoType::Prim(Prim::Float)))?;
-                            }
-                            (MonoType::Prim(Prim::Double), MonoType::Prim(Prim::Double)) => {
-                                self.unify(c_arg, &*self.ctx.alloc(MonoType::Prim(Prim::Double)))?;
-                            }
-                            (MonoType::Prim(Prim::Long), MonoType::Prim(Prim::Long)) => {
-                                self.unify(c_arg, &*self.ctx.alloc(MonoType::Prim(Prim::Long)))?;
-                            }
-                            (MonoType::Prim(Prim::Short), MonoType::Prim(Prim::Short)) => {
-                                self.unify(c_arg, &*self.ctx.alloc(MonoType::Prim(Prim::Short)))?;
-                            }
-                            (MonoType::Prim(Prim::Byte), MonoType::Prim(Prim::Byte)) => {
-                                self.unify(c_arg, &*self.ctx.alloc(MonoType::Prim(Prim::Byte)))?;
-                            }
-                            (MonoType::Prim(Prim::Char), MonoType::Prim(Prim::Char)) => {
-                                self.unify(c_arg, &*self.ctx.alloc(MonoType::Prim(Prim::Char)))?;
-                            }
-                            _ => {}
+                    if let (MonoType::Prim(p1), MonoType::Prim(p2)) = (a, b) {
+                        if p1 == p2 && is_arithmetic_prim(*p1) {
+                            self.unify(result_type, &*self.ctx.alloc(MonoType::Prim(*p1)))?;
                         }
                     }
                 }
             }
         }
 
-        for c in self.constraints.borrow().iter() {
-            if let MonoType::Constraint(name, args, _) = c.chase() {
-                // If satisfied by the typeclass registry instance database, discharge constraint
-                if self.classes.is_satisfied(name, args) {
+        for constraint in self.constraints.borrow().iter() {
+            if let MonoType::Constraint(name, args, _) = constraint.chase() {
+                if self.classes.is_satisfied(name, args)
+                    || is_ground_arithmetic_satisfied(name, args)
+                {
                     continue;
                 }
 
-                // Or if satisfied by standard arithmetic ground primitives
-                if args.len() == 3 && (*name == "Add" || *name == "Subtract" || *name == "Multiply" || *name == "Divide") {
-                    let a = args[0].chase();
-                    let b = args[1].chase();
-                    let c_arg = args[2].chase();
-                    match (a, b, c_arg) {
-                        (MonoType::Prim(p1), MonoType::Prim(p2), MonoType::Prim(p3)) => {
-                            if (p1 == p2 && p2 == p3)
-                                || (*p1 == Prim::DateTime && *p2 == Prim::Time && *p3 == Prim::DateTime)
-                                || (*p1 == Prim::Time && *p2 == Prim::TimeSpan && *p3 == Prim::Time)
-                            {
-                                continue;
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-
-                let is_unsatisfiable = if let Some(explanation) = self.classes.explain_unsatisfiable(name, args) {
-                    Some(Some(explanation))
-                } else {
-                    let class_def = self.classes.classes.get(*name);
-                    if let Some(cd) = class_def {
-                        if !cd.fundeps.is_empty() {
-                            let from_closed = cd.fundeps.iter().any(|(from, _)| {
-                                from.iter().all(|&i| i < args.len() && !crate::lang::typeclass::has_free_tvars(args[i].chase()))
-                            });
-                            if from_closed {
-                                Some(None)
-                            } else {
-                                None
-                            }
-                        } else {
-                            None
-                        }
-                    } else {
-                        None
-                    }
-                };
-
-                if let Some(explanation) = is_unsatisfiable {
+                if let Some(explanation) = self.check_unsatisfiable(name, args) {
                     let arg_strs: Vec<String> = args
                         .iter()
                         .map(|arg| {
@@ -195,35 +168,37 @@ impl<'a> TypeInference<'a> {
         Ok(())
     }
 
+    fn check_unsatisfiable(&self, name: &str, args: &[&'a MonoType<'a>]) -> Option<Option<String>> {
+        if let Some(explanation) = self.classes.explain_unsatisfiable(name, args) {
+            return Some(Some(explanation));
+        }
+
+        let class_def = self.classes.classes.get(name)?;
+        if !class_def.fundeps.is_empty() {
+            let from_closed = class_def.fundeps.iter().any(|(from, _)| {
+                from.iter().all(|&idx| {
+                    idx < args.len() && !crate::lang::typeclass::has_free_tvars(args[idx].chase())
+                })
+            });
+            if from_closed {
+                return Some(None);
+            }
+        }
+        None
+    }
+
     pub fn residual_constraints(&self) -> Vec<(&'a str, Vec<&'a MonoType<'a>>)> {
         let mut residuals = Vec::new();
         let constraints = self.constraints.borrow().clone();
-        for c in constraints {
-            if let MonoType::Constraint(name, args, _) = c.chase() {
-                // If satisfied by the typeclass registry instance database, discharge constraint
-                if self.classes.is_satisfied(name, args) {
+        for constraint in constraints {
+            if let MonoType::Constraint(name, args, _) = constraint.chase() {
+                if self.classes.is_satisfied(name, args)
+                    || is_ground_arithmetic_satisfied(name, args)
+                {
                     continue;
                 }
-
-                // Or if satisfied by standard arithmetic ground primitives
-                if args.len() == 3 {
-                    let a = args[0].chase();
-                    let b = args[1].chase();
-                    let c_arg = args[2].chase();
-                    match (a, b, c_arg) {
-                        (MonoType::Prim(Prim::Int), MonoType::Prim(Prim::Int), MonoType::Prim(Prim::Int))
-                        | (MonoType::Prim(Prim::Float), MonoType::Prim(Prim::Float), MonoType::Prim(Prim::Float))
-                        | (MonoType::Prim(Prim::Double), MonoType::Prim(Prim::Double), MonoType::Prim(Prim::Double))
-                        | (MonoType::Prim(Prim::Long), MonoType::Prim(Prim::Long), MonoType::Prim(Prim::Long))
-                        | (MonoType::Prim(Prim::Short), MonoType::Prim(Prim::Short), MonoType::Prim(Prim::Short))
-                        | (MonoType::Prim(Prim::Byte), MonoType::Prim(Prim::Byte), MonoType::Prim(Prim::Byte))
-                        | (MonoType::Prim(Prim::Char), MonoType::Prim(Prim::Char), MonoType::Prim(Prim::Char)) => {
-                            continue;
-                        }
-                        _ => {}
-                    }
-                }
-                let chased_args: Vec<&'a MonoType<'a>> = args.iter().map(|arg| arg.chase()).collect();
+                let chased_args: Vec<&'a MonoType<'a>> =
+                    args.iter().map(|arg| arg.chase()).collect();
                 residuals.push((*name, chased_args));
             }
         }
@@ -314,11 +289,11 @@ impl<'a> TypeInference<'a> {
             MonoType::Tuple(elems) => elems.iter().any(|e| Self::occurs(tvar_id, e)),
             MonoType::Record(fields, tail) => {
                 fields.iter().any(|(_, t)| Self::occurs(tvar_id, t))
-                    || tail.map_or(false, |t| Self::occurs(tvar_id, t))
+                    || tail.is_some_and(|t| Self::occurs(tvar_id, t))
             }
             MonoType::Variant(cases, tail) => {
                 cases.iter().any(|(_, t)| Self::occurs(tvar_id, t))
-                    || tail.map_or(false, |t| Self::occurs(tvar_id, t))
+                    || tail.is_some_and(|t| Self::occurs(tvar_id, t))
             }
             MonoType::App(f, args) => {
                 Self::occurs(tvar_id, f) || args.iter().any(|a| Self::occurs(tvar_id, a))
@@ -333,8 +308,12 @@ impl<'a> TypeInference<'a> {
     pub fn unify(&self, t1: &'a MonoType<'a>, t2: &'a MonoType<'a>) -> Result<(), TypeError> {
         let mut t1 = t1.chase();
         let mut t2 = t2.chase();
-        if let MonoType::Constraint(_, _, inner) = t1 { t1 = inner.chase(); }
-        if let MonoType::Constraint(_, _, inner) = t2 { t2 = inner.chase(); }
+        if let MonoType::Constraint(_, _, inner) = t1 {
+            t1 = inner.chase();
+        }
+        if let MonoType::Constraint(_, _, inner) = t2 {
+            t2 = inner.chase();
+        }
 
         if std::ptr::eq(t1, t2) {
             return Ok(());
@@ -370,136 +349,116 @@ impl<'a> TypeInference<'a> {
                 Ok(())
             }
             (MonoType::Record(fs1, tail1), MonoType::Record(fs2, tail2)) => {
-                let mut map1 = std::collections::HashMap::new();
-                for (n, t) in *fs1 {
-                    map1.insert(*n, *t);
-                }
-                let mut map2 = std::collections::HashMap::new();
-                for (n, t) in *fs2 {
-                    map2.insert(*n, *t);
-                }
-
-                let mut diff1 = Vec::new();
-                let mut diff2 = Vec::new();
-
-                for (n, t1_f) in *fs1 {
-                    if let Some(t2_f) = map2.remove(n) {
-                        self.unify(t1_f, t2_f)?;
-                    } else {
-                        diff1.push((*n, *t1_f));
-                    }
-                }
-
-                for (n, t2_f) in *fs2 {
-                    if !map1.contains_key(n) {
-                        diff2.push((*n, *t2_f));
-                    }
-                }
-
-                if diff1.is_empty() && diff2.is_empty() {
-                    if let (Some(r1), Some(r2)) = (tail1, tail2) {
-                        self.unify(*r1, *r2)?;
-                    }
-                    return Ok(());
-                }
-
-                let new_tail = self.fresh_tvar();
-
-                if !diff1.is_empty() {
-                    if let Some(r2) = tail2 {
-                        let diff1_slice = self.ctx.arena().alloc_slice_copy(&diff1);
-                        let ext2 = self
-                            .ctx
-                            .alloc(MonoType::Record(diff1_slice, Some(new_tail)));
-                        self.unify(*r2, ext2)?;
-                    } else {
-                        return Err(TypeError::TypeMismatch);
-                    }
-                }
-
-                if !diff2.is_empty() {
-                    if let Some(r1) = tail1 {
-                        let diff2_slice = self.ctx.arena().alloc_slice_copy(&diff2);
-                        let ext1 = self
-                            .ctx
-                            .alloc(MonoType::Record(diff2_slice, Some(new_tail)));
-                        self.unify(*r1, ext1)?;
-                    } else {
-                        return Err(TypeError::TypeMismatch);
-                    }
-                }
-
-                Ok(())
+                self.unify_rows(RowKind::Record, fs1, *tail1, fs2, *tail2)
             }
             (MonoType::Variant(fs1, tail1), MonoType::Variant(fs2, tail2)) => {
-                let mut map1 = std::collections::HashMap::new();
-                for (n, t) in *fs1 {
-                    map1.insert(*n, *t);
-                }
-                let mut map2 = std::collections::HashMap::new();
-                for (n, t) in *fs2 {
-                    map2.insert(*n, *t);
-                }
-
-                let mut diff1 = Vec::new();
-                let mut diff2 = Vec::new();
-
-                for (n, t1_f) in *fs1 {
-                    if let Some(t2_f) = map2.remove(n) {
-                        self.unify(t1_f, t2_f)?;
-                    } else {
-                        diff1.push((*n, *t1_f));
-                    }
-                }
-
-                for (n, t2_f) in *fs2 {
-                    if !map1.contains_key(n) {
-                        diff2.push((*n, *t2_f));
-                    }
-                }
-
-                if diff1.is_empty() && diff2.is_empty() {
-                    if let (Some(r1), Some(r2)) = (tail1, tail2) {
-                        self.unify(*r1, *r2)?;
-                    }
-                    return Ok(());
-                }
-
-                let new_tail = self.fresh_tvar();
-
-                if !diff1.is_empty() {
-                    if let Some(r2) = tail2 {
-                        let diff1_slice = self.ctx.arena().alloc_slice_copy(&diff1);
-                        let ext2 = self
-                            .ctx
-                            .alloc(MonoType::Variant(diff1_slice, Some(new_tail)));
-                        self.unify(*r2, ext2)?;
-                    } else {
-                        return Err(TypeError::TypeMismatch);
-                    }
-                }
-
-                if !diff2.is_empty() {
-                    if let Some(r1) = tail1 {
-                        let diff2_slice = self.ctx.arena().alloc_slice_copy(&diff2);
-                        let ext1 = self
-                            .ctx
-                            .alloc(MonoType::Variant(diff2_slice, Some(new_tail)));
-                        self.unify(*r1, ext1)?;
-                    } else {
-                        return Err(TypeError::TypeMismatch);
-                    }
-                }
-
-                Ok(())
+                self.unify_rows(RowKind::Variant, fs1, *tail1, fs2, *tail2)
             }
             _ => Err(TypeError::TypeMismatch),
         }
     }
 
+    fn unify_rows(
+        &self,
+        kind: RowKind,
+        fs1: &'a [(&'a str, &'a MonoType<'a>)],
+        tail1: Option<&'a MonoType<'a>>,
+        fs2: &'a [(&'a str, &'a MonoType<'a>)],
+        tail2: Option<&'a MonoType<'a>>,
+    ) -> Result<(), TypeError> {
+        let mut map1 = std::collections::HashMap::new();
+        for (n, t) in fs1 {
+            map1.insert(*n, *t);
+        }
+        let mut map2 = std::collections::HashMap::new();
+        for (n, t) in fs2 {
+            map2.insert(*n, *t);
+        }
+
+        let mut diff1 = Vec::new();
+        let mut diff2 = Vec::new();
+
+        for (n, t1_f) in fs1 {
+            if let Some(t2_f) = map2.remove(n) {
+                self.unify(t1_f, t2_f)?;
+            } else {
+                diff1.push((*n, *t1_f));
+            }
+        }
+
+        for (n, t2_f) in fs2 {
+            if !map1.contains_key(n) {
+                diff2.push((*n, *t2_f));
+            }
+        }
+
+        if diff1.is_empty() && diff2.is_empty() {
+            if let (Some(r1), Some(r2)) = (tail1, tail2) {
+                self.unify(r1, r2)?;
+            }
+            return Ok(());
+        }
+
+        let new_tail = self.fresh_tvar();
+
+        if !diff1.is_empty() {
+            if let Some(r2) = tail2 {
+                let diff1_slice = self.ctx.arena().alloc_slice_copy(&diff1);
+                let ext2 = match kind {
+                    RowKind::Record => self
+                        .ctx
+                        .alloc(MonoType::Record(diff1_slice, Some(new_tail))),
+                    RowKind::Variant => self
+                        .ctx
+                        .alloc(MonoType::Variant(diff1_slice, Some(new_tail))),
+                };
+                self.unify(r2, ext2)?;
+            } else {
+                return Err(TypeError::TypeMismatch);
+            }
+        }
+
+        if !diff2.is_empty() {
+            if let Some(r1) = tail1 {
+                let diff2_slice = self.ctx.arena().alloc_slice_copy(&diff2);
+                let ext1 = match kind {
+                    RowKind::Record => self
+                        .ctx
+                        .alloc(MonoType::Record(diff2_slice, Some(new_tail))),
+                    RowKind::Variant => self
+                        .ctx
+                        .alloc(MonoType::Variant(diff2_slice, Some(new_tail))),
+                };
+                self.unify(r1, ext1)?;
+            } else {
+                return Err(TypeError::TypeMismatch);
+            }
+        }
+
+        Ok(())
+    }
+
     pub fn fresh_tvar(&self) -> &'a MonoType<'a> {
         let id = self.ctx.fresh_tvar_id();
-        &*self.ctx.alloc(MonoType::TVar(id, std::cell::Cell::new(None)))
+        &*self
+            .ctx
+            .alloc(MonoType::TVar(id, std::cell::Cell::new(None)))
+    }
+
+    fn with_bindings<R>(
+        &mut self,
+        bindings: Vec<(&'a str, &'a MonoType<'a>)>,
+        f: impl FnOnce(&mut Self) -> R,
+    ) -> R {
+        let prev_env = self.env.clone();
+        let mut new_env = prev_env.clone();
+        for (name, ty) in bindings {
+            new_env = Rc::new(TypeEnv::extend(new_env, name, ty));
+        }
+        self.env = new_env;
+        let result = f(self);
+        self.env = prev_env;
+        result
     }
 
     fn visit_pattern(
@@ -571,6 +530,111 @@ impl<'a> TypeInference<'a> {
             }
         }
     }
+
+    fn apply_tuple_domain(
+        &mut self,
+        elem_tys: &'a [&'a MonoType<'a>],
+        ret: &'a MonoType<'a>,
+        constraints: Vec<(&'a str, &'a [&'a MonoType<'a>])>,
+        args: &'a [&'a Expr<'a>],
+    ) -> Result<&'a MonoType<'a>, TypeError> {
+        let chased_dom = &*self.ctx.alloc(MonoType::Tuple(elem_tys));
+
+        // If single argument passed:
+        if args.len() == 1 {
+            let arg_ty = self.visit(args[0])?;
+            if let MonoType::Tuple(arg_elem_tys) = arg_ty.chase() {
+                if arg_elem_tys.len() == elem_tys.len() {
+                    self.unify(arg_ty, chased_dom)?;
+                    return Ok(self.wrap_constraints(constraints, ret));
+                }
+            }
+
+            // Otherwise auto-curry: apply single argument to elem_tys[0]
+            self.unify(arg_ty, elem_tys[0])?;
+            let rem_tys = &elem_tys[1..];
+            let rem_dom = if rem_tys.len() == 1 {
+                rem_tys[0]
+            } else {
+                &*self
+                    .ctx
+                    .alloc(MonoType::Tuple(self.ctx.arena().alloc_slice_clone(rem_tys)))
+            };
+            let rem_fn = &*self.ctx.alloc(MonoType::Fn(rem_dom, ret));
+            return Ok(self.wrap_constraints(constraints, rem_fn));
+        }
+
+        // If multiple arguments matching tuple domain length:
+        if elem_tys.len() == args.len() && args.len() > 1 {
+            for (arg, param_ty) in args.iter().zip(elem_tys.iter()) {
+                let arg_ty = self.visit(arg)?;
+                self.unify(arg_ty, param_ty)?;
+            }
+            return Ok(self.wrap_constraints(constraints, ret));
+        }
+
+        // If multiple arguments passed, but fewer than tuple domain length (partial application):
+        if args.len() > 1 && args.len() < elem_tys.len() {
+            for (arg, param_ty) in args.iter().zip(elem_tys.iter()) {
+                let arg_ty = self.visit(arg)?;
+                self.unify(arg_ty, param_ty)?;
+            }
+            let rem_tys = &elem_tys[args.len()..];
+            let rem_dom = if rem_tys.len() == 1 {
+                rem_tys[0]
+            } else {
+                &*self
+                    .ctx
+                    .alloc(MonoType::Tuple(self.ctx.arena().alloc_slice_clone(rem_tys)))
+            };
+            let rem_fn = &*self.ctx.alloc(MonoType::Fn(rem_dom, ret));
+            return Ok(self.wrap_constraints(constraints, rem_fn));
+        }
+
+        // If more arguments passed than tuple domain length:
+        for (arg, param_ty) in args[..elem_tys.len()].iter().zip(elem_tys.iter()) {
+            let arg_ty = self.visit(arg)?;
+            self.unify(arg_ty, param_ty)?;
+        }
+        let mut curr_ty = self.wrap_constraints(constraints, ret);
+        for arg in &args[elem_tys.len()..] {
+            let ret_ty = self.fresh_tvar();
+            let arg_ty = self.visit(arg)?;
+            let expected_f_ty = &*self.ctx.alloc(MonoType::Fn(arg_ty, ret_ty));
+            self.unify(curr_ty, expected_f_ty)?;
+            curr_ty = ret_ty;
+        }
+        Ok(curr_ty)
+    }
+
+    fn try_apply_curried_to_tuple(
+        &mut self,
+        inner_ty: &'a MonoType<'a>,
+        constraints: &[(&'a str, &'a [&'a MonoType<'a>])],
+        arg_expr: &'a Expr<'a>,
+    ) -> Result<Option<&'a MonoType<'a>>, TypeError> {
+        let arg_ty = self.visit(arg_expr)?;
+        if let MonoType::Tuple(tup_elems) = arg_ty.chase() {
+            if tup_elems.len() > 1 {
+                let mut curried_params: Vec<&'a MonoType<'a>> = Vec::new();
+                let mut cur = inner_ty;
+                while let MonoType::Fn(param, next) = cur {
+                    curried_params.push(*param);
+                    cur = next.chase();
+                    if curried_params.len() == tup_elems.len() {
+                        break;
+                    }
+                }
+                if curried_params.len() == tup_elems.len() {
+                    for (elem, param) in tup_elems.iter().zip(curried_params) {
+                        self.unify(elem, param)?;
+                    }
+                    return Ok(Some(self.wrap_constraints(constraints.to_vec(), cur)));
+                }
+            }
+        }
+        Ok(None)
+    }
 }
 
 impl<'a> ExprVisitor<'a, Result<&'a MonoType<'a>, TypeError>> for TypeInference<'a> {
@@ -629,16 +693,7 @@ impl<'a> ExprVisitor<'a, Result<&'a MonoType<'a>, TypeError>> for TypeInference<
         let mut bindings = Vec::new();
         self.visit_pattern(pat, generalized_ty, &mut bindings)?;
 
-        let prev_env = self.env.clone();
-        let mut new_env = prev_env.clone();
-        for (name, ty) in bindings {
-            new_env = Rc::new(TypeEnv::extend(new_env, name, ty));
-        }
-        self.env = new_env;
-
-        let body_ty = self.visit(body)?;
-        self.env = prev_env; // restore
-        Ok(body_ty)
+        self.with_bindings(bindings, |this| this.visit(body))
     }
 
     fn visit_fn(
@@ -651,15 +706,7 @@ impl<'a> ExprVisitor<'a, Result<&'a MonoType<'a>, TypeError>> for TypeInference<
         let mut bindings = Vec::new();
         self.visit_pattern(pat, arg_ty, &mut bindings)?;
 
-        let prev_env = self.env.clone();
-        let mut new_env = prev_env.clone();
-        for (name, ty) in bindings {
-            new_env = Rc::new(TypeEnv::extend(new_env, name, ty));
-        }
-        self.env = new_env;
-
-        let ret_ty = self.visit(body)?;
-        self.env = prev_env;
+        let ret_ty = self.with_bindings(bindings, |this| this.visit(body))?;
 
         Ok(&*self.ctx.alloc(MonoType::Fn(arg_ty, ret_ty)))
     }
@@ -675,96 +722,14 @@ impl<'a> ExprVisitor<'a, Result<&'a MonoType<'a>, TypeError>> for TypeInference<
         if let MonoType::Fn(dom, ret) = inner_ty {
             let chased_dom = dom.chase();
             if let MonoType::Tuple(elem_tys) = chased_dom {
-                // If single argument passed:
-                if args.len() == 1 {
-                    let arg_ty = self.visit(args[0])?;
-                    // If the single argument is a tuple matching domain length, unify directly
-                    if let MonoType::Tuple(arg_elem_tys) = arg_ty.chase() {
-                        if arg_elem_tys.len() == elem_tys.len() {
-                            self.unify(arg_ty, chased_dom)?;
-                            return Ok(self.wrap_constraints(constraints, ret));
-                        }
-                    }
-
-                    // Otherwise auto-curry: apply single argument to elem_tys[0]
-                    self.unify(arg_ty, elem_tys[0])?;
-                    let rem_tys = &elem_tys[1..];
-                    let rem_dom = if rem_tys.len() == 1 {
-                        rem_tys[0]
-                    } else {
-                        &*self
-                            .ctx
-                            .alloc(MonoType::Tuple(self.ctx.arena().alloc_slice_clone(rem_tys)))
-                    };
-                    let rem_fn = &*self.ctx.alloc(MonoType::Fn(rem_dom, ret));
-                    return Ok(self.wrap_constraints(constraints, rem_fn));
-                }
-
-                // If multiple arguments matching tuple domain length:
-                if elem_tys.len() == args.len() && args.len() > 1 {
-                    for (arg, param_ty) in args.iter().zip(elem_tys.iter()) {
-                        let arg_ty = self.visit(*arg)?;
-                        self.unify(arg_ty, param_ty)?;
-                    }
-                    return Ok(self.wrap_constraints(constraints, ret));
-                }
-
-                // If multiple arguments passed, but fewer than tuple domain length (partial application):
-                if args.len() > 1 && args.len() < elem_tys.len() {
-                    for (arg, param_ty) in args.iter().zip(elem_tys.iter()) {
-                        let arg_ty = self.visit(*arg)?;
-                        self.unify(arg_ty, param_ty)?;
-                    }
-                    let rem_tys = &elem_tys[args.len()..];
-                    let rem_dom = if rem_tys.len() == 1 {
-                        rem_tys[0]
-                    } else {
-                        &*self
-                            .ctx
-                            .alloc(MonoType::Tuple(self.ctx.arena().alloc_slice_clone(rem_tys)))
-                    };
-                    let rem_fn = &*self.ctx.alloc(MonoType::Fn(rem_dom, ret));
-                    return Ok(self.wrap_constraints(constraints, rem_fn));
-                }
-
-                // If more arguments passed than tuple domain length:
-                if args.len() > elem_tys.len() {
-                    for (arg, param_ty) in args[..elem_tys.len()].iter().zip(elem_tys.iter()) {
-                        let arg_ty = self.visit(*arg)?;
-                        self.unify(arg_ty, param_ty)?;
-                    }
-                    let mut curr_ty = self.wrap_constraints(constraints, ret);
-                    for arg in &args[elem_tys.len()..] {
-                        let ret_ty = self.fresh_tvar();
-                        let arg_ty = self.visit(*arg)?;
-                        let expected_f_ty = &*self.ctx.alloc(MonoType::Fn(arg_ty, ret_ty));
-                        self.unify(curr_ty, expected_f_ty)?;
-                        curr_ty = ret_ty;
-                    }
-                    return Ok(curr_ty);
-                }
+                return self.apply_tuple_domain(elem_tys, ret, constraints, args);
             } else if args.len() == 1 {
-                // Curried function applied to a tuple argument: e.g. (\x -> \y -> x + y) (1.0, 2.0)
-                let arg_ty = self.visit(args[0])?;
-                if let MonoType::Tuple(tup_elems) = arg_ty.chase() {
-                    if tup_elems.len() > 1 {
-                        let mut curried_params: Vec<&'a MonoType<'a>> = Vec::new();
-                        let mut cur = inner_ty;
-                        while let MonoType::Fn(param, next) = cur {
-                            curried_params.push(*param);
-                            cur = next.chase();
-                            if curried_params.len() == tup_elems.len() {
-                                break;
-                            }
-                        }
-                        if curried_params.len() == tup_elems.len() {
-                            for (elem, param) in tup_elems.iter().zip(curried_params.into_iter()) {
-                                self.unify(elem, param)?;
-                            }
-                            return Ok(self.wrap_constraints(constraints, cur));
-                        }
-                    }
+                if let Some(res) =
+                    self.try_apply_curried_to_tuple(inner_ty, &constraints, args[0])?
+                {
+                    return Ok(res);
                 }
+                let arg_ty = self.visit(args[0])?;
                 let ret_ty = self.fresh_tvar();
                 let expected_f_ty = &*self.ctx.alloc(MonoType::Fn(arg_ty, ret_ty));
                 self.unify(curr_f_ty, expected_f_ty)?;
@@ -775,7 +740,7 @@ impl<'a> ExprVisitor<'a, Result<&'a MonoType<'a>, TypeError>> for TypeInference<
         let mut curr_ty = curr_f_ty;
         for arg in args {
             let ret_ty = self.fresh_tvar();
-            let arg_ty = self.visit(*arg)?;
+            let arg_ty = self.visit(arg)?;
             let expected_f_ty = &*self.ctx.alloc(MonoType::Fn(arg_ty, ret_ty));
             self.unify(curr_ty, expected_f_ty)?;
             curr_ty = ret_ty;
@@ -856,17 +821,8 @@ impl<'a> ExprVisitor<'a, Result<&'a MonoType<'a>, TypeError>> for TypeInference<
             let mut bindings = Vec::new();
             self.visit_pattern(pat, scrutinee_ty, &mut bindings)?;
 
-            let prev_env = self.env.clone();
-            let mut new_env = prev_env.clone();
-            for (name, ty) in bindings {
-                new_env = Rc::new(TypeEnv::extend(new_env, name, ty));
-            }
-            self.env = new_env;
-
-            let branch_ty = self.visit(body)?;
+            let branch_ty = self.with_bindings(bindings, |this| this.visit(body))?;
             self.unify(ret_ty, branch_ty)?;
-
-            self.env = prev_env;
         }
 
         Ok(ret_ty)

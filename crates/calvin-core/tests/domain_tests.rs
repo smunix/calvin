@@ -35,7 +35,10 @@ fn test_monotype_domain_queries() {
     let var_ty = ctx.alloc(MonoType::Variant(var_cases, None));
     assert!(var_ty.is_variant());
 
-    let tvar_ty = ctx.alloc(MonoType::TVar(ctx.fresh_tvar_id(), std::cell::Cell::new(None)));
+    let tvar_ty = ctx.alloc(MonoType::TVar(
+        ctx.fresh_tvar_id(),
+        std::cell::Cell::new(None),
+    ));
     assert!(tvar_ty.is_tvar());
 
     let constraint_args = ctx.alloc_slice_clone(&[&*int_ty]);

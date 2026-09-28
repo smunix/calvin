@@ -22,13 +22,28 @@ pub enum BackendChoice {
 
 fn format_type_error(err: &calvin_core::lang::typeinf::TypeError, src: &str) -> String {
     match err {
-        calvin_core::lang::typeinf::TypeError::TypeMismatch => "Type error: TypeMismatch".to_string(),
-        calvin_core::lang::typeinf::TypeError::OccursCheckFailed => "Type error: OccursCheckFailed".to_string(),
-        calvin_core::lang::typeinf::TypeError::UnboundVariable(v) => format!("Type error: UnboundVariable({})", v),
-        calvin_core::lang::typeinf::TypeError::UnsatisfiableConstraint { class_name, args, explanation } => {
+        calvin_core::lang::typeinf::TypeError::TypeMismatch => {
+            "Type error: TypeMismatch".to_string()
+        }
+        calvin_core::lang::typeinf::TypeError::OccursCheckFailed => {
+            "Type error: OccursCheckFailed".to_string()
+        }
+        calvin_core::lang::typeinf::TypeError::UnboundVariable(v) => {
+            format!("Type error: UnboundVariable({})", v)
+        }
+        calvin_core::lang::typeinf::TypeError::UnsatisfiableConstraint {
+            class_name,
+            args,
+            explanation,
+        } => {
             let cst_str = format!("{} {}", class_name, args.join(" "));
             let span_end = src.trim().len();
-            let mut out = format!("stdin:1,1-{}: Constraint not satisfiable: {}\n1 {}", span_end, cst_str, src.trim());
+            let mut out = format!(
+                "stdin:1,1-{}: Constraint not satisfiable: {}\n1 {}",
+                span_end,
+                cst_str,
+                src.trim()
+            );
             if let Some(expl) = explanation {
                 out.push('\n');
                 out.push_str(expl);
@@ -48,13 +63,13 @@ fn format_unresolved_constraints_error<'a>(
             let mut set = std::collections::HashSet::new();
             arg.free_tvars(&mut set);
             for id in set {
-                if !names.contains_key(&id) {
+                if let std::collections::hash_map::Entry::Vacant(e) = names.entry(id) {
                     let name = if var_idx < 26 {
                         ((b'a' + var_idx as u8) as char).to_string()
                     } else {
                         format!("t{}", var_idx - 26)
                     };
-                    names.insert(id, name);
+                    e.insert(name);
                     var_idx += 1;
                 }
             }
@@ -159,8 +174,10 @@ impl<'ctx> Compiler<'ctx> {
         let ty = type_inf
             .visit(expr)
             .map_err(|e| format_type_error(&e, src))?;
-            
-        type_inf.solve_constraints().map_err(|e| format_type_error(&e, src))?;
+
+        type_inf
+            .solve_constraints()
+            .map_err(|e| format_type_error(&e, src))?;
 
         let residuals = type_inf.residual_constraints();
         Ok(calvin_core::lang::types::format_qual_type(ty, &residuals))
@@ -172,8 +189,10 @@ impl<'ctx> Compiler<'ctx> {
         let ty = type_inf
             .visit(expr)
             .map_err(|e| format_type_error(&e, src))?;
-            
-        type_inf.solve_constraints().map_err(|e| format_type_error(&e, src))?;
+
+        type_inf
+            .solve_constraints()
+            .map_err(|e| format_type_error(&e, src))?;
 
         let residuals = type_inf.residual_constraints();
         if !residuals.is_empty() {
@@ -195,8 +214,10 @@ impl<'ctx> Compiler<'ctx> {
         let ty = type_inf
             .visit(expr)
             .map_err(|e| format_type_error(&e, src))?;
-            
-        type_inf.solve_constraints().map_err(|e| format_type_error(&e, src))?;
+
+        type_inf
+            .solve_constraints()
+            .map_err(|e| format_type_error(&e, src))?;
 
         let residuals = type_inf.residual_constraints();
         if !residuals.is_empty() {
@@ -263,8 +284,10 @@ impl<'ctx> Compiler<'ctx> {
         let ty = type_inf
             .visit(expr)
             .map_err(|e| format_type_error(&e, src))?;
-            
-        type_inf.solve_constraints().map_err(|e| format_type_error(&e, src))?;
+
+        type_inf
+            .solve_constraints()
+            .map_err(|e| format_type_error(&e, src))?;
 
         let residuals = type_inf.residual_constraints();
         if !residuals.is_empty() {
@@ -280,12 +303,18 @@ impl<'ctx> Compiler<'ctx> {
                 MonoType::Prim(Prim::Double | Prim::Float) => {
                     let func_ptr = jit.compile_expr::<f64>(expr, ty);
                     let res = func_ptr();
-                    Ok(unsafe { calvin_core::runtime::value::format_runtime_value(res.to_bits(), ty) })
+                    Ok(unsafe {
+                        calvin_core::runtime::value::format_runtime_value(res.to_bits(), ty)
+                    })
                 }
                 _ => {
                     let func_ptr = jit.compile_expr::<i64>(expr, ty);
                     let res = func_ptr();
-                    Ok(unsafe { calvin_core::runtime::value::format_runtime_value(res as u64, ty) })
+                    Ok(
+                        unsafe {
+                            calvin_core::runtime::value::format_runtime_value(res as u64, ty)
+                        },
+                    )
                 }
             }
         } else if let Some(ref jit) = self.llvm_jit {
@@ -293,12 +322,18 @@ impl<'ctx> Compiler<'ctx> {
                 MonoType::Prim(Prim::Double | Prim::Float) => {
                     let jit_fn = jit.compile_expr::<f64>(expr, ty);
                     let res = unsafe { jit_fn.call() };
-                    Ok(unsafe { calvin_core::runtime::value::format_runtime_value(res.to_bits(), ty) })
+                    Ok(unsafe {
+                        calvin_core::runtime::value::format_runtime_value(res.to_bits(), ty)
+                    })
                 }
                 _ => {
                     let jit_fn = jit.compile_expr::<i64>(expr, ty);
                     let res = unsafe { jit_fn.call() };
-                    Ok(unsafe { calvin_core::runtime::value::format_runtime_value(res as u64, ty) })
+                    Ok(
+                        unsafe {
+                            calvin_core::runtime::value::format_runtime_value(res as u64, ty)
+                        },
+                    )
                 }
             }
         } else {
@@ -389,7 +424,9 @@ mod tests {
         assert_eq!(compiler.eval_dynamic("convert(1) :: double").unwrap(), "1");
         assert_eq!(compiler.eval_dynamic("convert 1 :: long").unwrap(), "1");
         assert_eq!(
-            compiler.eval_dynamic("(convert 1 :: double) + 2.5").unwrap(),
+            compiler
+                .eval_dynamic("(convert 1 :: double) + 2.5")
+                .unwrap(),
             "3.5"
         );
     }
@@ -402,9 +439,10 @@ mod tests {
         assert_eq!(compiler.eval_dynamic("convert(1) :: double").unwrap(), "1");
         assert_eq!(compiler.eval_dynamic("convert 1 :: long").unwrap(), "1");
         assert_eq!(
-            compiler.eval_dynamic("(convert 1 :: double) + 2.5").unwrap(),
+            compiler
+                .eval_dynamic("(convert 1 :: double) + 2.5")
+                .unwrap(),
             "3.5"
         );
     }
 }
-

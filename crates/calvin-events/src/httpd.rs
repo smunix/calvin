@@ -59,18 +59,20 @@ impl HttpServer {
         println!("HTTP server listening on {}", addr);
 
         loop {
-            let (mut socket, _) = listener.accept().await?;
-            tokio::spawn(async move {
-                let mut buf = [0; 1024];
-                if let Ok(n) = socket.read(&mut buf).await {
-                    if n == 0 {
-                        return;
-                    }
-                    // Very basic HTTP 200 OK response
-                    let response = "HTTP/1.1 200 OK\r\nContent-Length: 13\r\n\r\nHello, Calvin!";
-                    let _ = socket.write_all(response.as_bytes()).await;
-                }
-            });
+            let (socket, _) = listener.accept().await?;
+            tokio::spawn(handle_http_connection(socket));
         }
+    }
+}
+
+async fn handle_http_connection(mut socket: tokio::net::TcpStream) {
+    let mut request_buffer = [0; 1024];
+    if let Ok(bytes_read) = socket.read(&mut request_buffer).await {
+        if bytes_read == 0 {
+            return;
+        }
+        // Very basic HTTP 200 OK response
+        let response = "HTTP/1.1 200 OK\r\nContent-Length: 13\r\n\r\nHello, Calvin!";
+        let _ = socket.write_all(response.as_bytes()).await;
     }
 }

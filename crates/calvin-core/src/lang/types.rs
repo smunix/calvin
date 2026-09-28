@@ -440,7 +440,9 @@ impl<'a> fmt::Debug for MonoType<'a> {
             MonoType::Tuple(elems) => {
                 write!(f, "(")?;
                 for (i, e) in elems.iter().enumerate() {
-                    if i > 0 { write!(f, " * ")?; }
+                    if i > 0 {
+                        write!(f, " * ")?;
+                    }
                     write!(f, "{:?}", e)?;
                 }
                 write!(f, ")")
@@ -448,10 +450,16 @@ impl<'a> fmt::Debug for MonoType<'a> {
             MonoType::Constraint(name, args, inner) => {
                 write!(f, "{} ", name)?;
                 for (i, arg) in args.iter().enumerate() {
-                    if i > 0 { write!(f, " ")?; }
+                    if i > 0 {
+                        write!(f, " ")?;
+                    }
                     write!(f, "{:?}", arg)?;
                 }
-                write!(f, ", packsto (((a) * b) -> c * (a)) exists E.((E * b) -> c * E) => {:?}", inner)
+                write!(
+                    f,
+                    ", packsto (((a) * b) -> c * (a)) exists E.((E * b) -> c * E) => {:?}",
+                    inner
+                )
             }
             _ => write!(f, "Other"),
         }
@@ -497,9 +505,9 @@ pub fn compare_monotype<'a, 'b>(a: &'a MonoType<'a>, b: &'b MonoType<'b>) -> std
     }
 }
 
-pub fn compare_constraint<'a, 'b, 's1, 's2>(
-    c1: &(&'s1 str, Vec<&'a MonoType<'a>>),
-    c2: &(&'s2 str, Vec<&'b MonoType<'b>>),
+pub fn compare_constraint<'a, 'b>(
+    c1: &(&str, Vec<&'a MonoType<'a>>),
+    c2: &(&str, Vec<&'b MonoType<'b>>),
 ) -> std::cmp::Ordering {
     match c1.0.cmp(c2.0) {
         std::cmp::Ordering::Equal => {
@@ -563,7 +571,10 @@ pub fn format_qual_type<'a>(
     }
 }
 
-pub fn format_mono<'a>(ty: &'a MonoType<'a>, names: &std::collections::HashMap<usize, String>) -> String {
+pub fn format_mono<'a>(
+    ty: &'a MonoType<'a>,
+    names: &std::collections::HashMap<usize, String>,
+) -> String {
     let ty = ty.chase();
     match ty {
         MonoType::Prim(p) => match p {
@@ -581,9 +592,10 @@ pub fn format_mono<'a>(ty: &'a MonoType<'a>, names: &std::collections::HashMap<u
             Prim::TimeSpan => "timespan".to_string(),
             Prim::DateTime => "datetime".to_string(),
         },
-        MonoType::TVar(id, _) => {
-            names.get(id).cloned().unwrap_or_else(|| format!(".t{}", id))
-        }
+        MonoType::TVar(id, _) => names
+            .get(id)
+            .cloned()
+            .unwrap_or_else(|| format!(".t{}", id)),
         MonoType::TGen(i) => {
             if *i < 26 {
                 ((b'a' + *i as u8) as char).to_string()

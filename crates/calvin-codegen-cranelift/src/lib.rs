@@ -47,4 +47,3 @@ mod domain_tests {
         assert_eq!(sym2.as_str(), "calvin_alloc");
     }
 }
-

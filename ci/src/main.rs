@@ -88,7 +88,9 @@ fn process_line(input: &str, compiler: &mut Compiler) -> bool {
                 println!("  :t <expr>     Print the inferred type of <expr>");
                 println!("  :u <expr>     Print the unsweetened AST of <expr>");
                 println!("  :a <expr>     Dump the Cranelift/Llvm IR for <expr>");
-                println!("  :x <expr>     Disassemble the JIT-compiled native machine code for <expr>");
+                println!(
+                    "  :x <expr>     Disassemble the JIT-compiled native machine code for <expr>"
+                );
                 println!("  :l <path>     Load a script or fregion structured data file");
             }
             ":t" => match compiler.type_of(arg) {

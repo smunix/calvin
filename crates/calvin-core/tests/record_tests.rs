@@ -123,9 +123,7 @@ fn test_record_and_variant_formatting() {
     assert_eq!(formatted, "{x=1, y=2}");
 
     // Variant: tag 0, payload 42
-    let cases = ctx
-        .arena()
-        .alloc_slice_copy(&[("x", int_ty as &MonoType)]);
+    let cases = ctx.arena().alloc_slice_copy(&[("x", int_ty as &MonoType)]);
     let var_ty = ctx.alloc(MonoType::Variant(cases, None));
     let var_data: [u64; 2] = [0, 42];
     let formatted_var = unsafe { format_runtime_value(var_data.as_ptr() as u64, var_ty) };
@@ -138,6 +136,7 @@ fn test_record_and_variant_formatting() {
         .alloc_slice_copy(&[("Foo", unit_ty as &MonoType)]);
     let unit_var_ty = ctx.alloc(MonoType::Variant(unit_cases, None));
     let unit_var_data: [u64; 2] = [0, 0];
-    let formatted_unit = unsafe { format_runtime_value(unit_var_data.as_ptr() as u64, unit_var_ty) };
+    let formatted_unit =
+        unsafe { format_runtime_value(unit_var_data.as_ptr() as u64, unit_var_ty) };
     assert_eq!(formatted_unit, "|Foo|");
 }

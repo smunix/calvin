@@ -9,55 +9,8 @@ pub fn desugar_lambda<'ctx>(ctx: &'ctx TypeContext, expr: &'ctx Expr<'ctx>) -> &
         Expr::Fn(pat, body) => {
             let desugared_body = desugar_lambda(ctx, body);
             match pat {
-                Pattern::Tuple(pats) => {
-                    let mut arg_pats = Vec::new();
-                    let mut let_bindings = Vec::new(); // (rv_name, arg_name, orig_name)
-
-                    for (i, p) in pats.iter().enumerate() {
-                        let arg_name: &'ctx str = ctx.arena().alloc_str(&format!(".arg{}", i));
-                        arg_pats.push(Pattern::Var(arg_name));
-
-                        let tvar_id = ctx.fresh_tvar_id();
-                        let rv_name: &'ctx str =
-                            ctx.arena().alloc_str(&format!(".t{}.rv{}", tvar_id, i));
-
-                        let orig_name = match p {
-                            Pattern::Var(v) => *v,
-                            _ => "_",
-                        };
-                        let_bindings.push((rv_name, arg_name, orig_name));
-                    }
-
-                    // Substitute in body
-                    let mut curr_body = desugared_body;
-                    for (rv_name, _, orig_name) in &let_bindings {
-                        if *orig_name != "_" {
-                            curr_body = subst_var(ctx, curr_body, orig_name, rv_name);
-                        }
-                    }
-
-                    // Nest let expressions from inside out
-                    for (rv_name, arg_name, _) in let_bindings.into_iter().rev() {
-                        let arg_var = &*ctx.alloc(Expr::Var(arg_name));
-                        curr_body = &*ctx.alloc(Expr::Let(Pattern::Var(rv_name), arg_var, curr_body));
-                    }
-
-                    let arg_pats_slice = ctx.alloc_slice_clone(&arg_pats);
-                    &*ctx.alloc(Expr::Fn(Pattern::Tuple(arg_pats_slice), curr_body))
-                }
-                Pattern::Var(v) => {
-                    let arg_name: &'ctx str = ctx.arena().alloc_str(".arg0");
-                    let tvar_id = ctx.fresh_tvar_id();
-                    let rv_name: &'ctx str =
-                        ctx.arena().alloc_str(&format!(".t{}.rv0", tvar_id));
-
-                    let curr_body = subst_var(ctx, desugared_body, v, rv_name);
-                    let arg_var = &*ctx.alloc(Expr::Var(arg_name));
-                    let let_body = &*ctx.alloc(Expr::Let(Pattern::Var(rv_name), arg_var, curr_body));
-
-                    let arg_pats = ctx.alloc_slice_clone(&[Pattern::Var(arg_name)]);
-                    &*ctx.alloc(Expr::Fn(Pattern::Tuple(arg_pats), let_body))
-                }
+                Pattern::Tuple(pats) => desugar_tuple_lambda(ctx, pats, desugared_body),
+                Pattern::Var(v) => desugar_var_lambda(ctx, v, desugared_body),
                 _ => &*ctx.alloc(Expr::Fn(pat.clone(), desugared_body)),
             }
         }
@@ -99,6 +52,71 @@ pub fn desugar_lambda<'ctx>(ctx: &'ctx TypeContext, expr: &'ctx Expr<'ctx>) -> &
     }
 }
 
+fn desugar_tuple_lambda<'ctx>(
+    ctx: &'ctx TypeContext,
+    pats: &[Pattern<'ctx>],
+    desugared_body: &'ctx Expr<'ctx>,
+) -> &'ctx Expr<'ctx> {
+    let mut arg_pats = Vec::new();
+    let mut let_bindings = Vec::new(); // (rv_name, arg_name, orig_name)
+
+    for (i, p) in pats.iter().enumerate() {
+        let arg_name: &'ctx str = ctx.arena().alloc_str(&format!(".arg{}", i));
+        arg_pats.push(Pattern::Var(arg_name));
+
+        let tvar_id = ctx.fresh_tvar_id();
+        let rv_name: &'ctx str = ctx.arena().alloc_str(&format!(".t{}.rv{}", tvar_id, i));
+
+        let orig_name = match p {
+            Pattern::Var(v) => *v,
+            _ => "_",
+        };
+        let_bindings.push((rv_name, arg_name, orig_name));
+    }
+
+    // Substitute in body
+    let mut curr_body = desugared_body;
+    for (rv_name, _, orig_name) in &let_bindings {
+        if *orig_name != "_" {
+            curr_body = subst_var(ctx, curr_body, orig_name, rv_name);
+        }
+    }
+
+    // Nest let expressions from inside out
+    for (rv_name, arg_name, _) in let_bindings.into_iter().rev() {
+        let arg_var = &*ctx.alloc(Expr::Var(arg_name));
+        curr_body = &*ctx.alloc(Expr::Let(Pattern::Var(rv_name), arg_var, curr_body));
+    }
+
+    let arg_pats_slice = ctx.alloc_slice_clone(&arg_pats);
+    &*ctx.alloc(Expr::Fn(Pattern::Tuple(arg_pats_slice), curr_body))
+}
+
+fn desugar_var_lambda<'ctx>(
+    ctx: &'ctx TypeContext,
+    var_name: &'ctx str,
+    desugared_body: &'ctx Expr<'ctx>,
+) -> &'ctx Expr<'ctx> {
+    let arg_name: &'ctx str = ctx.arena().alloc_str(".arg0");
+    let tvar_id = ctx.fresh_tvar_id();
+    let rv_name: &'ctx str = ctx.arena().alloc_str(&format!(".t{}.rv0", tvar_id));
+
+    let curr_body = subst_var(ctx, desugared_body, var_name, rv_name);
+    let arg_var = &*ctx.alloc(Expr::Var(arg_name));
+    let let_body = &*ctx.alloc(Expr::Let(Pattern::Var(rv_name), arg_var, curr_body));
+
+    let arg_pats = ctx.alloc_slice_clone(&[Pattern::Var(arg_name)]);
+    &*ctx.alloc(Expr::Fn(Pattern::Tuple(arg_pats), let_body))
+}
+
+fn pattern_shadows(pattern: &Pattern, target: &str) -> bool {
+    match pattern {
+        Pattern::Var(v) => *v == target,
+        Pattern::Tuple(pats) => pats.iter().any(|p| pattern_shadows(p, target)),
+        _ => false,
+    }
+}
+
 /// Substitute variable occurrences in expression.
 pub fn subst_var<'ctx>(
     ctx: &'ctx TypeContext,
@@ -119,12 +137,7 @@ pub fn subst_var<'ctx>(
         }
         Expr::Let(p, d, b) => {
             let new_d = subst_var(ctx, d, target, replacement);
-            // If let-binding shadows target, do not substitute in body
-            let shadows = match p {
-                Pattern::Var(v) => *v == target,
-                _ => false,
-            };
-            let new_b = if shadows {
+            let new_b = if pattern_shadows(p, target) {
                 b
             } else {
                 subst_var(ctx, b, target, replacement)
@@ -132,15 +145,7 @@ pub fn subst_var<'ctx>(
             &*ctx.alloc(Expr::Let(p.clone(), new_d, new_b))
         }
         Expr::Fn(p, b) => {
-            let shadows = match p {
-                Pattern::Var(v) => *v == target,
-                Pattern::Tuple(pats) => pats.iter().any(|p| match p {
-                    Pattern::Var(v) => *v == target,
-                    _ => false,
-                }),
-                _ => false,
-            };
-            let new_b = if shadows {
+            let new_b = if pattern_shadows(p, target) {
                 b
             } else {
                 subst_var(ctx, b, target, replacement)
@@ -201,19 +206,38 @@ fn format_csts_ty<'a>(
     }
 }
 
+fn normalize_constraints<'a>(constraints: &mut [(&'static str, Vec<&'a MonoType<'a>>)]) {
+    for (_, args) in constraints.iter_mut() {
+        for arg in args {
+            *arg = arg.chase();
+        }
+    }
+    constraints.sort_by(crate::lang::types::compare_constraint);
+}
+
+fn merge_constraints<'a>(
+    target: &mut Vec<(&'static str, Vec<&'a MonoType<'a>>)>,
+    source: Vec<(&'static str, Vec<&'a MonoType<'a>>)>,
+) {
+    for constraint in source {
+        if !target.contains(&constraint) {
+            target.push(constraint);
+        }
+    }
+}
+
 /// Recursively infers types and formats the expression in Hobbes annotated syntax (`showAnnotated`).
+type AnnotatedExpr<'ctx> = (
+    String,
+    &'ctx MonoType<'ctx>,
+    Vec<(&'static str, Vec<&'ctx MonoType<'ctx>>)>,
+);
+
 fn show_annotated_internal<'ctx>(
     ctx: &'ctx TypeContext,
     expr: &'ctx Expr<'ctx>,
     type_inf: &mut TypeInference<'ctx>,
-) -> Result<
-    (
-        String,
-        &'ctx MonoType<'ctx>,
-        Vec<(&'static str, Vec<&'ctx MonoType<'ctx>>)>,
-    ),
-    String,
-> {
+) -> Result<AnnotatedExpr<'ctx>, String> {
     match expr {
         Expr::Literal(lit) => match lit {
             Literal::Int(n) => {
@@ -300,11 +324,7 @@ fn show_annotated_internal<'ctx>(
                 let (a_str, a_ty, a_csts) = show_annotated_internal(ctx, arg, type_inf)?;
                 arg_strs.push(a_str);
                 arg_tys.push(a_ty);
-                for c in a_csts {
-                    if !csts.contains(&c) {
-                        csts.push(c);
-                    }
-                }
+                merge_constraints(&mut csts, a_csts);
             }
             let ret_ty = type_inf.fresh_tvar();
             let expected_arg_ty = if arg_tys.len() == 1 {
@@ -317,17 +337,15 @@ fn show_annotated_internal<'ctx>(
                 .unify(f_ty, expected_fn_ty)
                 .map_err(|e| format!("{:?}", e))?;
 
-            // Re-chase constraints
-            for (_, cargs) in &mut csts {
-                for a in cargs {
-                    *a = a.chase();
-                }
-            }
-            csts.sort_by(crate::lang::types::compare_constraint);
+            normalize_constraints(&mut csts);
 
             let app_body = format!("({})({})", f_str, arg_strs.join(", "));
             let qual_ty_str = format_csts_ty(&csts, ret_ty.chase());
-            Ok((format!("{}:{}", app_body, qual_ty_str), ret_ty.chase(), csts))
+            Ok((
+                format!("{}:{}", app_body, qual_ty_str),
+                ret_ty.chase(),
+                csts,
+            ))
         }
         Expr::Let(pat, def, body) => {
             let (def_str, def_ty, mut csts) = show_annotated_internal(ctx, def, type_inf)?;
@@ -338,20 +356,8 @@ fn show_annotated_internal<'ctx>(
 
             type_inf.bind(var_name, def_ty);
             let (body_str, body_ty, body_csts) = show_annotated_internal(ctx, body, type_inf)?;
-
-            for c in body_csts {
-                if !csts.contains(&c) {
-                    csts.push(c);
-                }
-            }
-
-            // Re-chase constraints
-            for (_, cargs) in &mut csts {
-                for a in cargs {
-                    *a = a.chase();
-                }
-            }
-            csts.sort_by(crate::lang::types::compare_constraint);
+            merge_constraints(&mut csts, body_csts);
+            normalize_constraints(&mut csts);
 
             let qual_ty_str = format_csts_ty(&csts, body_ty.chase());
             let s = format!(
@@ -379,15 +385,14 @@ fn show_annotated_internal<'ctx>(
                 }
                 Pattern::Var(v) => {
                     let tvar = type_inf.fresh_tvar();
-                    type_inf.bind(*v, tvar);
+                    type_inf.bind(v, tvar);
                     arg_names.push(*v);
                     arg_tys.push(tvar);
                 }
                 _ => unimplemented!(),
             }
 
-            let (body_str, body_ty, mut body_csts) =
-                show_annotated_internal(ctx, body, type_inf)?;
+            let (body_str, body_ty, mut body_csts) = show_annotated_internal(ctx, body, type_inf)?;
 
             let fn_arg_ty = if arg_tys.len() == 1 {
                 arg_tys[0]
@@ -396,16 +401,15 @@ fn show_annotated_internal<'ctx>(
             };
             let fn_ty = &*ctx.alloc(MonoType::Fn(fn_arg_ty, body_ty));
 
-            // Re-chase constraints
-            for (_, cargs) in &mut body_csts {
-                for a in cargs {
-                    *a = a.chase();
-                }
-            }
-            body_csts.sort_by(crate::lang::types::compare_constraint);
+            normalize_constraints(&mut body_csts);
 
             let qual_ty_str = format_csts_ty(&body_csts, fn_ty.chase());
-            let s = format!("(\\({}).({})):{}", arg_names.join(", "), body_str, qual_ty_str);
+            let s = format!(
+                "(\\({}).({})):{}",
+                arg_names.join(", "),
+                body_str,
+                qual_ty_str
+            );
             Ok((s, fn_ty.chase(), body_csts))
         }
         _ => Err("Unsupported expression in unsweeten".to_string()),

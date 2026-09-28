@@ -50,7 +50,7 @@ pub async fn handle_connection(mut conn: Connection, _state: ServerState) -> io:
 
     // Simplistic command loop
     loop {
-        std::thread::sleep(std::time::Duration::from_millis(100));
+        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
         // Read 1-byte command (simulating for DEFEXPR / INVOKE)
         // Note: For INVOKE, Hobbes uses cmd=2.
         // For DEFEXPR, cmd=0.

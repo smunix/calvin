@@ -1,4 +1,4 @@
-use crate::protocol::{DefExprPayload, HNetCmd, HNET_VERSION};
+use crate::protocol::{DefExprPayload, HNetCmd, ProtocolVersion};
 use std::io;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
@@ -13,9 +13,11 @@ impl Connection {
     }
 
     pub async fn handshake_client(&mut self) -> io::Result<()> {
-        self.stream.write_u32_le(HNET_VERSION).await?;
+        self.stream
+            .write_u32_le(ProtocolVersion::V1.as_u32())
+            .await?;
         let server_version = self.stream.read_u32_le().await?;
-        if server_version != HNET_VERSION {
+        if !ProtocolVersion(server_version).is_compatible() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "Version mismatch",
@@ -26,27 +28,29 @@ impl Connection {
 
     pub async fn handshake_server(&mut self) -> io::Result<()> {
         let client_version = self.stream.read_u32_le().await?;
-        if client_version != HNET_VERSION {
+        if !ProtocolVersion(client_version).is_compatible() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "Version mismatch",
             ));
         }
-        self.stream.write_u32_le(HNET_VERSION).await?;
+        self.stream
+            .write_u32_le(ProtocolVersion::V1.as_u32())
+            .await?;
         Ok(())
     }
 
     // Read a string prefixed by a 32-bit little-endian length
     async fn read_string(&mut self) -> io::Result<String> {
-        let len = self.stream.read_u32_le().await? as usize;
-        let mut buf = vec![0u8; len];
-        self.stream.read_exact(&mut buf).await?;
-        String::from_utf8(buf)
+        let length = self.stream.read_u32_le().await? as usize;
+        let mut string_buffer = vec![0u8; length];
+        self.stream.read_exact(&mut string_buffer).await?;
+        String::from_utf8(string_buffer)
             .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "Invalid UTF-8"))
     }
 
-    async fn write_string(&mut self, s: &str) -> io::Result<()> {
-        let bytes = s.as_bytes();
+    async fn write_string(&mut self, text: &str) -> io::Result<()> {
+        let bytes = text.as_bytes();
         self.stream.write_u32_le(bytes.len() as u32).await?;
         self.stream.write_all(bytes).await?;
         Ok(())

@@ -46,7 +46,10 @@ fn test_hobbes_type_parity_multi_operators() {
     typeinf.solve_constraints().expect("solve failed");
     let residuals = typeinf.residual_constraints();
     let formatted = format_qual_type(ty, &residuals);
-    assert_eq!(formatted, "Multiply a b d, Multiply d c e => (a * b * c) -> e");
+    assert_eq!(
+        formatted,
+        "Multiply a b d, Multiply d c e => (a * b * c) -> e"
+    );
 
     // 3. \x -> \y -> \z -> x * y * z
     let mut typeinf = setup_typeinf(&ctx);
@@ -55,7 +58,10 @@ fn test_hobbes_type_parity_multi_operators() {
     typeinf.solve_constraints().expect("solve failed");
     let residuals = typeinf.residual_constraints();
     let formatted = format_qual_type(ty, &residuals);
-    assert_eq!(formatted, "Multiply a b d, Multiply d c e => (a) -> (b) -> (c) -> e");
+    assert_eq!(
+        formatted,
+        "Multiply a b d, Multiply d c e => (a) -> (b) -> (c) -> e"
+    );
 }
 
 #[test]
@@ -164,9 +170,15 @@ fn test_unsatisfiable_constraint_error() {
     let mut typeinf = setup_typeinf(&ctx);
     let ast = parse_expr(&ctx, "{x: 1, y: 2} + {x: 3, y: 3}").expect("parse failed");
     let _ty = typeinf.visit(ast).expect("infer failed");
-    let err = typeinf.solve_constraints().expect_err("should fail to solve");
+    let err = typeinf
+        .solve_constraints()
+        .expect_err("should fail to solve");
     match err {
-        calvin_core::lang::typeinf::TypeError::UnsatisfiableConstraint { class_name, args, explanation } => {
+        calvin_core::lang::typeinf::TypeError::UnsatisfiableConstraint {
+            class_name,
+            args,
+            explanation,
+        } => {
             assert_eq!(class_name, "Add");
             assert_eq!(args, vec!["{ x:int, y:int }", "{ x:int, y:int }", "a"]);
             assert!(explanation.is_some());
@@ -178,4 +190,3 @@ fn test_unsatisfiable_constraint_error() {
         _ => panic!("Expected UnsatisfiableConstraint error, got {:?}", err),
     }
 }
-

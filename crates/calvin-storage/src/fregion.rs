@@ -6,6 +6,11 @@ use std::path::Path;
 pub const HOBBES_FREGION_MAGIC: u32 = 0x10a1db0d;
 pub const PAGE_SIZE: usize = 4096;
 
+/// Align a size in bytes upwards to the nearest page boundary.
+pub const fn align_to_page(size: usize) -> usize {
+    (size + PAGE_SIZE - 1) & !(PAGE_SIZE - 1)
+}
+
 /// Value Object representing the file region magic identifier.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct RegionMagic(pub u32);
@@ -124,7 +129,7 @@ pub struct FRegion {
 
 impl FRegion {
     pub fn create<P: AsRef<Path>>(path: P, initial_size: usize) -> io::Result<Self> {
-        let size = (initial_size + PAGE_SIZE - 1) & !(PAGE_SIZE - 1); // align
+        let size = align_to_page(initial_size);
         let file = OpenOptions::new()
             .read(true)
             .write(true)
@@ -136,15 +141,15 @@ impl FRegion {
 
         // Write header
         let header = RegionHeader {
-            magic: HOBBES_FREGION_MAGIC,
-            version: 1,
+            magic: RegionMagic::DEFAULT.as_u32(),
+            version: RegionVersion::V1.as_u32(),
             size: size as u64,
-            root_offset: 0,
+            root_offset: RootOffset::ZERO.as_u64(),
         };
 
         unsafe {
-            let ptr = mmap.as_mut_ptr() as *mut RegionHeader;
-            *ptr = header;
+            let header_ptr = mmap.as_mut_ptr() as *mut RegionHeader;
+            *header_ptr = header;
         }
 
         Ok(Self { _file: file, mmap })
@@ -159,10 +164,10 @@ impl FRegion {
         }
 
         let header = unsafe { &*(mmap.as_ptr() as *const RegionHeader) };
-        if header.magic != HOBBES_FREGION_MAGIC {
+        if !header.is_valid() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
-                "Invalid magic number",
+                "Invalid magic number or unsupported region version",
             ));
         }
 
